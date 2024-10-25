@@ -168,11 +168,11 @@ public final class ControllerIndex {
 
     private native boolean nativeConnectHaptics(boolean isWindowsOrMac, Object clazzObject); /*
         jclass clazz = env->GetObjectClass(clazzObject);
-        jmethodID logMethod = env->GetStaticMethodID(env, clazz, "logFromNative", "(Ljava/lang/String;)V");
+        jmethodID logMethod = env->GetStaticMethodID(clazz, "logFromNative", "(Ljava/lang/String;)V");
         if(haptics_output != 0) {
-            jstring message = env->NewStringUTF(env, "Haptics output already initialized.");
-            env->CallStaticVoidMethod(env, clazz, logMethod, message);
-            env->DeleteLocalRef(env, message);
+            jstring message = env->NewStringUTF("Haptics output already initialized.");
+            env->CallStaticVoidMethod(clazz, logMethod, message);
+            env->DeleteLocalRef(message);
             return JNI_TRUE; // already initialized
         }
 
@@ -191,18 +191,18 @@ public final class ControllerIndex {
                 if (device_name == NULL || !strstr(device_name, "Wireless Controller")) {
                     char buffer[128];
                     snprintf(buffer, sizeof(buffer), "Skipping device %s: Not a 'Wireless Controller'", device_name ? device_name : "Unknown");
-                    jstring message = env->NewStringUTF(env, buffer);
-                    env->CallStaticVoidMethod(env, clazz, logMethod, message);
-                    env->DeleteLocalRef(env, message);
+                    jstring message = env->NewStringUTF(buffer);
+                    env->CallStaticVoidMethod(clazz, logMethod, message);
+                    env->DeleteLocalRef(message);
                     continue;
                 }
             } else {
                 if (device_name == NULL || !strstr(device_name, "DualSense")) {
                     char buffer[128];
                     snprintf(buffer, sizeof(buffer), "Skipping device %s: Not a 'DualSense'", device_name ? device_name : "Unknown");
-                    jstring message = env->NewStringUTF(env, buffer);
-                    env->CallStaticVoidMethod(env, clazz, logMethod, message);
-                    env->DeleteLocalRef(env, message);
+                    jstring message = env->NewStringUTF(buffer);
+                    env->CallStaticVoidMethod(clazz, logMethod, message);
+                    env->DeleteLocalRef(message);
                     continue;
                 }
             }
@@ -210,9 +210,9 @@ public final class ControllerIndex {
 	        if (haptics_output == 0) {
 	            char buffer[128];
                 snprintf(buffer, sizeof(buffer), "Failed to open audio device %s: %s", device_name, SDL_GetError());
-                jstring message = env->NewStringUTF(env, buffer);
-                env->CallStaticVoidMethod(env, clazz, logMethod, message);
-                env->DeleteLocalRef(env, message);
+                jstring message = env->NewStringUTF(buffer);
+                env->CallStaticVoidMethod(clazz, logMethod, message);
+                env->DeleteLocalRef(message);
 	            continue;
 	        }
 	        SDL_PauseAudioDevice(haptics_output, 0);
