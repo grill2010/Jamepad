@@ -5,12 +5,13 @@ on:
     branches:
       - master
       - sdl/**
+    workflow_dispatch:
 env:
   GRADLE_USER_HOME: .gradle
 
 jobs:
   macos:
-    runs-on: macos-11
+    runs-on: macos-12
     steps:
     - uses: actions/checkout@v3
       with:

@@ -23,6 +23,9 @@ public final class ControllerIndex {
 
     private static final boolean IS_WINDOWS = System.getProperty("os.name", "").toLowerCase().contains("win");
 
+    private static final boolean IS_MAC = System.getProperty("os.name", "").toLowerCase().contains("mac")
+            || System.getProperty("os.name", "").toLowerCase().contains("darwin");
+
     private static final float AXIS_MAX_VAL = 32767;
     private final int index;
     private long controllerPtr;
@@ -76,26 +79,33 @@ public final class ControllerIndex {
                 Objects.equals(Configuration.SonyControllerFeature.DUALSENSE_FEATURES_AND_HAPTICS, sonyControllerFeature)){
             boolean result = nativeEnableHaptics();
             if(result) {
-                connectHaptics();
+                connectHaptics(1_000, 0);
             } else {
                 System.out.println("Enable haptics for DualSense did not work. Error: " + getLastNativeError());
             }
         }
     }
 
-    private void connectHaptics() {
+    private void connectHaptics(final int timeout, final int count) {
         final Timer timer = new Timer();
         timer.schedule(
                 new TimerTask() {
                     @Override
                     public void run() {
-                        supportsHaptic = nativeConnectHaptics(IS_WINDOWS);
+                        if(!isConnected()){
+                            return; // If not connected anymore skip connect haptics
+                        }
+                        supportsHaptic = nativeConnectHaptics(IS_WINDOWS || IS_MAC, ControllerIndex.this);
                         if(!supportsHaptic){
-                            System.out.println("Connect haptics for DualSense did not working. Error: " + getLastNativeError());
+                            if(count == 0) {
+                                connectHaptics(10_000, count + 1); // try again one more time after timeout
+                            } else {
+                                System.out.println("Connect haptics for DualSense did not working. Error: " + getLastNativeError());
+                            }
                         }
                         timer.cancel();
                     }
-                }, 1000);
+                }, timeout);
     }
 
     /**
@@ -152,40 +162,39 @@ public final class ControllerIndex {
     #include <string.h>
     */
 
-    private native boolean nativeConnectHaptics(boolean isWindows); /*
+    private native boolean nativeConnectHaptics(boolean isWindowsOrMac, Object instance); /*
         if(haptics_output != 0) {
             return JNI_TRUE; // already initialized
         }
 
         SDL_AudioSpec want, have;
-	    SDL_zero(want);
-	    want.freq = 48000;
-	    want.format = AUDIO_S16LSB;
-	    want.channels = 4;
-	    want.samples = 480; // 10ms buffer
-	    want.callback = NULL;
+        SDL_zero(want);
+        want.freq = 48000;
+        want.format = AUDIO_S16LSB;
+        want.channels = 4;
+        want.samples = 480; // 10ms buffer
+        want.callback = NULL;
 
-	    for (int i=0; i < SDL_GetNumAudioDevices(0); i++)
-	    {
-	        const char* device_name = SDL_GetAudioDeviceName(i, 0);
-	        if(isWindows) {
-	            if (device_name == NULL || !strstr(device_name, "Wireless Controller")) {
-	                continue;
-	            }
-	        } else {
-	            if (device_name == NULL || !strstr(device_name, "DualSense")) {
-	                continue;
-	            }
-	        }
-	        haptics_output = SDL_OpenAudioDevice(device_name, 0, &want, &have, 0);
-	        if (haptics_output == 0) {
-	            continue;
-	        }
-	        SDL_PauseAudioDevice(haptics_output, 0);
-	        return JNI_TRUE;
-	    }
+        for (int i = 0; i < SDL_GetNumAudioDevices(0); i++) {
+            const char* device_name = SDL_GetAudioDeviceName(i, 0);
+            if (isWindowsOrMac) {
+                if (device_name == NULL || !strstr(device_name, "Wireless Controller")) {
+                    continue;
+                }
+            } else {
+                if (device_name == NULL || !strstr(device_name, "DualSense")) {
+                    continue;
+                }
+            }
+            haptics_output = SDL_OpenAudioDevice(device_name, 0, &want, &have, 0);
+            if (haptics_output == 0) {
+                continue;
+            }
+            SDL_PauseAudioDevice(haptics_output, 0);
+            return JNI_TRUE;
+        }
 
-	    return JNI_FALSE;
+        return JNI_FALSE;
     */
 
     /**
@@ -649,12 +658,12 @@ public final class ControllerIndex {
      */
 
     private native boolean nativeSendAdaptiveTriggerEffects(long controllerPtr,
-                                                         byte leftTriggerEffect,
-                                                         byte[] triggerDataLeft,
-                                                         int leftTriggerDataSize,
-                                                         byte rightTriggerEffect,
-                                                         byte[] triggerDataRight,
-                                                         int rightTriggerDataSize); /*
+                                                            byte leftTriggerEffect,
+                                                            byte[] triggerDataLeft,
+                                                            int leftTriggerDataSize,
+                                                            byte rightTriggerEffect,
+                                                            byte[] triggerDataRight,
+                                                            int rightTriggerDataSize); /*
         SDL_GameController* pad = (SDL_GameController*) controllerPtr;
 
         DS5EffectsState_t state;
