@@ -95,7 +95,7 @@ public final class ControllerIndex {
                         if(!isConnected()){
                             return; // If not connected anymore skip connect haptics
                         }
-                        supportsHaptic = nativeConnectHaptics(IS_WINDOWS || IS_MAC, this);
+                        supportsHaptic = nativeConnectHaptics(IS_WINDOWS || IS_MAC, ControllerIndex.this);
                         if(!supportsHaptic){
                             if(count == 0) {
                                 connectHaptics(10_000, count + 1); // try again one more time after timeout
