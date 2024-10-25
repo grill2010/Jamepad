@@ -95,7 +95,7 @@ public final class ControllerIndex {
                         if(!isConnected()){
                             return; // If not connected anymore skip connect haptics
                         }
-                        supportsHaptic = nativeConnectHaptics(IS_WINDOWS || IS_MAC);
+                        supportsHaptic = nativeConnectHaptics(IS_WINDOWS || IS_MAC, this);
                         if(!supportsHaptic){
                             if(count == 0) {
                                 connectHaptics(10_000, count + 1); // try again one more time after timeout
@@ -162,9 +162,19 @@ public final class ControllerIndex {
     #include <string.h>
     */
 
-    private native boolean nativeConnectHaptics(boolean isWindowsOrMac); /*
+    public static void logFromNative(String message) {
+        System.out.println("Native Log: " + message); // Replace with preferred logging mechanism
+    }
+
+    private native boolean nativeConnectHaptics(boolean isWindowsOrMac, Object clazzObject); /*
+        jclass clazz = env->GetObjectClass(clazzObject);
         if(haptics_output != 0) {
-            printf("Haptics output already initialized.\n");
+            jmethodID logMethod = env->GetStaticMethodID(env, clazz, "logFromNative", "(Ljava/lang/String;)V");
+            if (logMethod) {
+                jstring message = env->NewStringUTF(env, "Haptics output already initialized.");
+                env->CallStaticVoidMethod(env, clazz, logMethod, message);
+                env->DeleteLocalRef(env, message);
+            }
             return JNI_TRUE; // already initialized
         }
 
@@ -181,18 +191,30 @@ public final class ControllerIndex {
 	        const char* device_name = SDL_GetAudioDeviceName(i, 0);
 	        if(isWindowsOrMac) {
                 if (device_name == NULL || !strstr(device_name, "Wireless Controller")) {
-                    printf("Skipping device %s: Not a 'Wireless Controller'\n", device_name);
+                    char buffer[128];
+                    snprintf(buffer, sizeof(buffer), "Skipping device %s: Not a 'Wireless Controller'", device_name ? device_name : "Unknown");
+                    jstring message = env->NewStringUTF(env, buffer);
+                    env->CallStaticVoidMethod(env, clazz, logMethod, message);
+                    env->DeleteLocalRef(env, message);
                     continue;
                 }
             } else {
                 if (device_name == NULL || !strstr(device_name, "DualSense")) {
-                    printf("Skipping device %s: Not a 'DualSense'\n", device_name);
+                    char buffer[128];
+                    snprintf(buffer, sizeof(buffer), "Skipping device %s: Not a 'DualSense'", device_name ? device_name : "Unknown");
+                    jstring message = env->NewStringUTF(env, buffer);
+                    env->CallStaticVoidMethod(env, clazz, logMethod, message);
+                    env->DeleteLocalRef(env, message);
                     continue;
                 }
             }
 	        haptics_output = SDL_OpenAudioDevice(device_name, 0, &want, &have, 0);
 	        if (haptics_output == 0) {
-	            printf("Failed to open audio device %s: %s\n", device_name, SDL_GetError());
+	            char buffer[128];
+                snprintf(buffer, sizeof(buffer), "Failed to open audio device %s: %s", device_name, SDL_GetError());
+                jstring message = env->NewStringUTF(env, buffer);
+                env->CallStaticVoidMethod(env, clazz, logMethod, message);
+                env->DeleteLocalRef(env, message);
 	            continue;
 	        }
 	        SDL_PauseAudioDevice(haptics_output, 0);
