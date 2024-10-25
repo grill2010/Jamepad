@@ -168,13 +168,11 @@ public final class ControllerIndex {
 
     private native boolean nativeConnectHaptics(boolean isWindowsOrMac, Object clazzObject); /*
         jclass clazz = env->GetObjectClass(clazzObject);
+        jmethodID logMethod = env->GetStaticMethodID(env, clazz, "logFromNative", "(Ljava/lang/String;)V");
         if(haptics_output != 0) {
-            jmethodID logMethod = env->GetStaticMethodID(env, clazz, "logFromNative", "(Ljava/lang/String;)V");
-            if (logMethod) {
-                jstring message = env->NewStringUTF(env, "Haptics output already initialized.");
-                env->CallStaticVoidMethod(env, clazz, logMethod, message);
-                env->DeleteLocalRef(env, message);
-            }
+            jstring message = env->NewStringUTF(env, "Haptics output already initialized.");
+            env->CallStaticVoidMethod(env, clazz, logMethod, message);
+            env->DeleteLocalRef(env, message);
             return JNI_TRUE; // already initialized
         }
 
