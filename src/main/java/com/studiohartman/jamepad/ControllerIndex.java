@@ -164,6 +164,7 @@ public final class ControllerIndex {
 
     private native boolean nativeConnectHaptics(boolean isWindowsOrMac); /*
         if(haptics_output != 0) {
+            printf("Haptics output already initialized.\n");
             return JNI_TRUE; // already initialized
         }
 
@@ -179,16 +180,19 @@ public final class ControllerIndex {
 	    {
 	        const char* device_name = SDL_GetAudioDeviceName(i, 0);
 	        if(isWindowsOrMac) {
-	            if (device_name == NULL || !strstr(device_name, "Wireless Controller")) {
-	                continue;
-	            }
-	        } else {
-	            if (device_name == NULL || !strstr(device_name, "DualSense")) {
-	                continue;
-	            }
-	        }
+                if (device_name == NULL || !strstr(device_name, "Wireless Controller")) {
+                    printf("Skipping device %s: Not a 'Wireless Controller'\n", device_name);
+                    continue;
+                }
+            } else {
+                if (device_name == NULL || !strstr(device_name, "DualSense")) {
+                    printf("Skipping device %s: Not a 'DualSense'\n", device_name);
+                    continue;
+                }
+            }
 	        haptics_output = SDL_OpenAudioDevice(device_name, 0, &want, &have, 0);
 	        if (haptics_output == 0) {
+	            printf("Failed to open audio device %s: %s\n", device_name, SDL_GetError());
 	            continue;
 	        }
 	        SDL_PauseAudioDevice(haptics_output, 0);
@@ -659,12 +663,12 @@ public final class ControllerIndex {
      */
 
     private native boolean nativeSendAdaptiveTriggerEffects(long controllerPtr,
-                                                         byte leftTriggerEffect,
-                                                         byte[] triggerDataLeft,
-                                                         int leftTriggerDataSize,
-                                                         byte rightTriggerEffect,
-                                                         byte[] triggerDataRight,
-                                                         int rightTriggerDataSize); /*
+                                                            byte leftTriggerEffect,
+                                                            byte[] triggerDataLeft,
+                                                            int leftTriggerDataSize,
+                                                            byte rightTriggerEffect,
+                                                            byte[] triggerDataRight,
+                                                            int rightTriggerDataSize); /*
         SDL_GameController* pad = (SDL_GameController*) controllerPtr;
 
         DS5EffectsState_t state;
