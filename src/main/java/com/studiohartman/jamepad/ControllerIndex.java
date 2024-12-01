@@ -162,21 +162,8 @@ public final class ControllerIndex {
     #include <string.h>
     */
 
-    public void logFromNative(String message) {
-        System.out.println("Native Log: " + message); // Replace with preferred logging mechanism
-    }
-
     private native boolean nativeConnectHaptics(boolean isWindowsOrMac, Object instance); /*
-        jclass clazz = env->GetObjectClass(instance);
-        jmethodID logMethod = env->GetMethodID(clazz, "logFromNative", "(Ljava/lang/String;)V");
-        if (!logMethod) {
-            return JNI_FALSE;  // Early exit if method is not found
-        }
-
         if(haptics_output != 0) {
-            jstring message = env->NewStringUTF("Haptics output already initialized.");
-            env->CallVoidMethod(instance, logMethod, message); // Call the instance method
-            env->DeleteLocalRef(message);
             return JNI_TRUE; // already initialized
         }
 
@@ -192,30 +179,15 @@ public final class ControllerIndex {
             const char* device_name = SDL_GetAudioDeviceName(i, 0);
             if (isWindowsOrMac) {
                 if (device_name == NULL || !strstr(device_name, "Wireless Controller")) {
-                    char buffer[128];
-                    snprintf(buffer, sizeof(buffer), "Skipping device %s: Not a 'Wireless Controller'", device_name ? device_name : "Unknown");
-                    jstring message = env->NewStringUTF(buffer);
-                    env->CallVoidMethod(instance, logMethod, message); // Call instance method
-                    env->DeleteLocalRef(message);
                     continue;
                 }
             } else {
                 if (device_name == NULL || !strstr(device_name, "DualSense")) {
-                    char buffer[128];
-                    snprintf(buffer, sizeof(buffer), "Skipping device %s: Not a 'DualSense'", device_name ? device_name : "Unknown");
-                    jstring message = env->NewStringUTF(buffer);
-                    env->CallVoidMethod(instance, logMethod, message); // Call instance method
-                    env->DeleteLocalRef(message);
                     continue;
                 }
             }
             haptics_output = SDL_OpenAudioDevice(device_name, 0, &want, &have, 0);
             if (haptics_output == 0) {
-                char buffer[128];
-                snprintf(buffer, sizeof(buffer), "Failed to open audio device %s: %s", device_name, SDL_GetError());
-                jstring message = env->NewStringUTF(buffer);
-                env->CallVoidMethod(instance, logMethod, message); // Call instance method
-                env->DeleteLocalRef(message);
                 continue;
             }
             SDL_PauseAudioDevice(haptics_output, 0);
