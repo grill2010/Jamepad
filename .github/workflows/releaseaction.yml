@@ -48,14 +48,14 @@ jobs:
     - name: Build with Gradle
       run: ./gradlew jnigen jnigenBuild
     - name: Upload macOS natives
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: macos-natives
         path: libs
 
   linux:
     needs: macos
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     container: ubuntu:18.04
     env:
       ORG_GRADLE_PROJECT_GITHUB_USERNAME: ""
@@ -166,7 +166,7 @@ jobs:
     - name: Build with Gradle
       run: ./gradlew jnigen jnigenBuild jnigenJarNativesDesktop
     - name: Upload all output libs
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: output-libs
         path: build/libs/
