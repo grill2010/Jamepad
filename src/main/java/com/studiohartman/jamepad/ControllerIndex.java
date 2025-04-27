@@ -727,6 +727,152 @@ public final class ControllerIndex {
     */
 
     /**
+     * @return The number of available raw buttons on this controller.
+     * @throws ControllerUnpluggedException If the controller is not connected.
+     */
+    public int getNumRawButtons() throws ControllerUnpluggedException {
+        ensureConnected();
+        return nativeGetNumRawButtons(controllerPtr);
+    }
+
+    private native int nativeGetNumRawButtons(long controllerPtr); /*
+        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
+        SDL_Joystick* joy = SDL_GameControllerGetJoystick(pad);
+        return SDL_JoystickNumButtons(joy);
+    */
+
+    /**
+     * @return The number of available raw axes on this controller.
+     * @throws ControllerUnpluggedException If the controller is not connected.
+     */
+    public int getNumRawAxes() throws ControllerUnpluggedException {
+        ensureConnected();
+        return nativeGetNumRawAxes(controllerPtr);
+    }
+
+    private native int nativeGetNumRawAxes(long controllerPtr); /*
+        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
+        SDL_Joystick* joy = SDL_GameControllerGetJoystick(pad);
+        return SDL_JoystickNumAxes(joy);
+    */
+
+    /**
+     * Returns the raw pressed state of the specified button index.
+     * <p>
+     * The button index corresponds to the raw layout of the controller,
+     * independent of any mappings.
+     *
+     * @param buttonIndex The raw button index to check.
+     * @return {@code true} if the button is currently pressed, {@code false} otherwise.
+     * @throws ControllerUnpluggedException If the controller is not connected.
+     */
+    public boolean getRawButtonPressed(int buttonIndex) throws ControllerUnpluggedException {
+        ensureConnected();
+        return nativeGetRawButtonPressed(controllerPtr, buttonIndex);
+    }
+
+    private native boolean nativeGetRawButtonPressed(long controllerPtr, int buttonIndex); /*
+        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
+        SDL_Joystick* joy = SDL_GameControllerGetJoystick(pad);
+        return SDL_JoystickGetButton(joy, buttonIndex) ? JNI_TRUE : JNI_FALSE;
+    */
+
+    /**
+     * Returns the raw state of the specified axis index.
+     * <p>
+     * The returned value ranges from -32768 to 32767 depending on the axis position.
+     * The axis index corresponds to the raw physical controller axes,
+     * independent of any mappings.
+     *
+     * @param axisIndex The raw axis index to read.
+     * @return The current value of the axis.
+     * @throws ControllerUnpluggedException If the controller is not connected.
+     */
+    public int getRawAxisState(int axisIndex) throws ControllerUnpluggedException {
+        ensureConnected();
+        return nativeGetRawAxisState(controllerPtr, axisIndex);
+    }
+
+    private native int nativeGetRawAxisState(long controllerPtr, int axisIndex); /*
+        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
+        SDL_Joystick* joy = SDL_GameControllerGetJoystick(pad);
+        return SDL_JoystickGetAxis(joy, axisIndex);
+    */
+
+    /**
+     * @return The USB Vendor ID (VID) of the controller.
+     * @throws ControllerUnpluggedException If the controller is not connected.
+     */
+    public int getVendorId() throws ControllerUnpluggedException {
+        ensureConnected();
+        return nativeGetVendorId(controllerPtr);
+    }
+
+    private native int nativeGetVendorId(long controllerPtr); /*
+        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
+        SDL_Joystick* joy = SDL_GameControllerGetJoystick(pad);
+        return SDL_JoystickGetVendor(joy);
+    */
+
+    /**
+     * @return The USB Product ID (PID) of the controller.
+     * @throws ControllerUnpluggedException If the controller is not connected.
+     */
+    public int getProductId() throws ControllerUnpluggedException {
+        ensureConnected();
+        return nativeGetProductId(controllerPtr);
+    }
+
+    private native int nativeGetProductId(long controllerPtr); /*
+        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
+        SDL_Joystick* joy = SDL_GameControllerGetJoystick(pad);
+        return SDL_JoystickGetProduct(joy);
+    */
+
+    /**
+     * Returns the implementation-dependent device name of this controller.
+     * <p>
+     * This is usually the device name as reported by the operating system or driver.
+     *
+     * @return The device name string.
+     * @throws ControllerUnpluggedException If the controller is not connected.
+     */
+    public String getDeviceName() throws ControllerUnpluggedException {
+        ensureConnected();
+        return nativeGetDeviceName(controllerPtr);
+    }
+
+    private native String nativeGetDeviceName(long controllerPtr); /*
+        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
+        SDL_Joystick* joy = SDL_GameControllerGetJoystick(pad);
+        return env->NewStringUTF(SDL_JoystickName(joy));
+    */
+
+    /**
+     * Returns the unique GUID (Globally Unique Identifier) string for this controller.
+     * <p>
+     * The GUID identifies the hardware model and variant and can be used for
+     * distinguishing between different types of controllers.
+     *
+     * @return The device GUID as a hexadecimal string.
+     * @throws ControllerUnpluggedException If the controller is not connected.
+     */
+    public String getDeviceGuid() throws ControllerUnpluggedException {
+        ensureConnected();
+        return nativeGetDeviceGuid(controllerPtr);
+    }
+
+    private native String nativeGetDeviceGuid(long controllerPtr); /*
+        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
+        SDL_Joystick* joy = SDL_GameControllerGetJoystick(pad);
+
+        SDL_JoystickGUID guid = SDL_JoystickGetGUID(joy);
+        char guid_str[33];
+        SDL_JoystickGetGUIDString(guid, guid_str, sizeof(guid_str));
+        return env->NewStringUTF(guid_str);
+    */
+
+    /**
      * Convenience method to throw an exception if the controller is not connected.
      */
     private void ensureConnected() throws ControllerUnpluggedException {
