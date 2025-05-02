@@ -35,6 +35,8 @@ public final class ControllerIndex {
 
     private final Configuration.SonyControllerFeature sonyControllerFeature;
 
+    private String controllerGuid = "";
+
     private boolean supportsTouchpad = false;
 
     private boolean supportsSensors = false;
@@ -71,6 +73,7 @@ public final class ControllerIndex {
 
     private void connectController() {
         controllerPtr = nativeConnectController(index);
+        controllerGuid = nativeGetDeviceGuid(controllerPtr);
         if(!Objects.equals(Configuration.SonyControllerFeature.NONE, sonyControllerFeature)) {
             supportsTouchpad = nativeIsTouchpadSupported(controllerPtr);
             supportsSensors = nativeEnableSensors(controllerPtr);
@@ -235,6 +238,10 @@ public final class ControllerIndex {
 
     boolean isUsingSonyControllerFeatures() {
         return !Objects.equals(Configuration.SonyControllerFeature.NONE, sonyControllerFeature);
+    }
+
+    public String getControllerGuid() {
+        return controllerGuid;
     }
 
     public boolean isSupportingTouchpadData() {
