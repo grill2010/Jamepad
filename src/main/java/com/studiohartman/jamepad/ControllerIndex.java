@@ -53,6 +53,8 @@ public final class ControllerIndex {
 
     private volatile boolean closing = false;
 
+    private static final String EMPTY_GUID = "00000000000000000000000000000000";
+
     /**
      * Constructor. Builds a controller at the given index and attempts to connect to it.
      * This is only accessible in the Jamepad package, so people can't go trying to make controllers
@@ -77,6 +79,13 @@ public final class ControllerIndex {
 
     private void connectController() {
         controllerPtr = nativeConnectController(index);
+        if (controllerPtr == 0) {
+            controllerGuid = EMPTY_GUID;
+            supportsTouchpad = false;
+            supportsSensors = false;
+            supportsHaptic = false;
+            return;
+        }
         controllerGuid = nativeGetDeviceGuid(controllerPtr);
         if(!Objects.equals(Configuration.SonyControllerFeature.NONE, sonyControllerFeature)) {
             supportsTouchpad = nativeIsTouchpadSupported(controllerPtr);
