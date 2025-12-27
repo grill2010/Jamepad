@@ -153,6 +153,7 @@ public final class ControllerIndex {
         }, timeout);
     }
 
+
     /**
      * Polls SDL manually.
      * If you use the *Fast* getters below, you MUST call poll() first.
