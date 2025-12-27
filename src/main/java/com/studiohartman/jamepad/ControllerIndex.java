@@ -49,6 +49,12 @@ public final class ControllerIndex {
 
     private final Map<Integer, TouchState> touchStates = new HashMap<>();
 
+    private Timer hapticsTimer;
+
+    private volatile boolean closing = false;
+
+    private static final String EMPTY_GUID = "00000000000000000000000000000000";
+
     /**
      * Constructor. Builds a controller at the given index and attempts to connect to it.
      * This is only accessible in the Jamepad package, so people can't go trying to make controllers
@@ -73,6 +79,13 @@ public final class ControllerIndex {
 
     private void connectController() {
         controllerPtr = nativeConnectController(index);
+        if (controllerPtr == 0) {
+            controllerGuid = EMPTY_GUID;
+            supportsTouchpad = false;
+            supportsSensors = false;
+            supportsHaptic = false;
+            return;
+        }
         controllerGuid = nativeGetDeviceGuid(controllerPtr);
         if(!Objects.equals(Configuration.SonyControllerFeature.NONE, sonyControllerFeature)) {
             supportsTouchpad = nativeIsTouchpadSupported(controllerPtr);
@@ -84,32 +97,62 @@ public final class ControllerIndex {
             if(result) {
                 connectHaptics(1_000, 0);
             } else {
-                System.out.println("Enable haptics for DualSense did not work. Error: " + getLastNativeError());
+                System.out.println("Enable haptics failed: " + getLastNativeError());
             }
         }
     }
 
     private void connectHaptics(final int timeout, final int count) {
-        final Timer timer = new Timer();
-        timer.schedule(
-                new TimerTask() {
-                    @Override
-                    public void run() {
-                        if(!isConnected()){
-                            return; // If not connected anymore skip connect haptics
-                        }
-                        supportsHaptic = nativeConnectHaptics(IS_WINDOWS || IS_MAC, ControllerIndex.this);
-                        if(!supportsHaptic){
-                            if(count == 0) {
-                                connectHaptics(10_000, count + 1); // try again one more time after timeout
-                            } else {
-                                System.out.println("Connect haptics for DualSense did not working. Error: " + getLastNativeError());
-                            }
-                        }
-                        timer.cancel();
+        final Timer oldTimer = hapticsTimer;
+        if (oldTimer != null) {
+            try {
+                oldTimer.cancel();
+            } catch (Throwable ignored) {
+                // ignore
+            }
+            hapticsTimer = null;
+        }
+
+        if (closing) {
+            return;
+        }
+
+        final Timer localTimer = new Timer(true); // daemon
+        hapticsTimer = localTimer;
+
+        localTimer.schedule(new TimerTask() {
+            @Override public void run() {
+                try {
+                    if (closing || !isConnected()) {
+                        return; // If not connected anymore skip connect haptics
                     }
-                }, timeout);
+
+                    supportsHaptic = nativeConnectHaptics(IS_WINDOWS || IS_MAC, ControllerIndex.this);
+
+                    if (!supportsHaptic) {
+                        if (count == 0) {
+                            connectHaptics(10_000, count + 1);
+                        } else {
+                            System.out.println("Connect haptics failed: " + getLastNativeError());
+                        }
+                    }
+                } finally {
+                    // Always cancel our own timer
+                    try {
+                        localTimer.cancel();
+                    } catch (Throwable ignored) {
+                        // ignore
+                    }
+
+                    // Only clear the field if nobody replaced it in the meantime
+                    if (hapticsTimer == localTimer) {
+                        hapticsTimer = null;
+                    }
+                }
+            }
+        }, timeout);
     }
+
 
     /**
      * @return last error message logged by the native lib. Use this for debugging purposes.
@@ -204,6 +247,16 @@ public final class ControllerIndex {
      * Close the connection to this controller.
      */
     public void close() {
+        this.closing = true;
+        final Timer timer = hapticsTimer;
+        if (timer != null) {
+            try {
+                timer.cancel();
+            } catch (Throwable ignored) {
+                // ignore
+            }
+            hapticsTimer = null;
+        }
         if(controllerPtr != 0) {
             if(needToClearTriggerEffect){
                 // clear trigger effects
