@@ -153,6 +153,18 @@ public final class ControllerIndex {
         }, timeout);
     }
 
+    /**
+     * Polls SDL manually.
+     * If you use the *Fast* getters below, you MUST call poll() first.
+     */
+    public void poll() throws ControllerUnpluggedException {
+        ensureConnected();
+        nativePoll(controllerPtr);
+    }
+
+    private native void nativePoll(long controllerPtr); /*
+        SDL_GameControllerUpdate();
+    */
 
     /**
      * @return last error message logged by the native lib. Use this for debugging purposes.
@@ -949,4 +961,101 @@ public final class ControllerIndex {
         return Objects.equals(Configuration.SonyControllerFeature.DUALSENSE_FEATURES, sonyControllerFeature) ||
                 Objects.equals(Configuration.SonyControllerFeature.DUALSENSE_FEATURES_AND_HAPTICS, sonyControllerFeature);
     }
+
+    /********************************/
+    /*** Fast getters (NO UPDATE) ***/
+    /********************************/
+
+    public float getAxisStateFast(ControllerAxis toCheck) throws ControllerUnpluggedException {
+        ensureConnected();
+        return nativeCheckAxisNoUpdate(controllerPtr, toCheck.ordinal()) / AXIS_MAX_VAL;
+    }
+
+    private native int nativeCheckAxisNoUpdate(long controllerPtr, int axisIndex); /*
+        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
+        return SDL_GameControllerGetAxis(pad, (SDL_GameControllerAxis) axisIndex);
+    */
+
+    public boolean isButtonPressedFast(ControllerButton toCheck) throws ControllerUnpluggedException {
+        updateButtonFast(toCheck.ordinal());
+        return heldDownButtons[toCheck.ordinal()];
+    }
+
+    public boolean isButtonJustPressedFast(ControllerButton toCheck) throws ControllerUnpluggedException {
+        updateButtonFast(toCheck.ordinal());
+        return justPressedButtons[toCheck.ordinal()];
+    }
+
+    private void updateButtonFast(int buttonIndex) throws ControllerUnpluggedException {
+        ensureConnected();
+        boolean currButtonIsPressed = nativeCheckButtonNoUpdate(controllerPtr, buttonIndex);
+        justPressedButtons[buttonIndex] = (currButtonIsPressed && !heldDownButtons[buttonIndex]);
+        heldDownButtons[buttonIndex] = currButtonIsPressed;
+    }
+
+    private native boolean nativeCheckButtonNoUpdate(long controllerPtr, int buttonIndex); /*
+        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
+        return SDL_GameControllerGetButton(pad, (SDL_GameControllerButton) buttonIndex);
+    */
+
+    public TouchState getTouchpadFingerFast(int finger) throws ControllerUnpluggedException {
+        ensureConnected();
+
+        TouchState touchState = touchStates.get(finger);
+        if (touchState == null) {
+            touchState = new TouchState();
+            touchStates.put(finger, touchState);
+        }
+        if (!supportsTouchpad) {
+            return touchState;
+        }
+
+        nativeGetTouchpadFingerNoUpdate(controllerPtr, finger, touchState);
+        return touchState;
+    }
+
+    private native void nativeGetTouchpadFingerNoUpdate(long controllerPtr, int finger, Object touchState); /*
+        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
+
+        Uint8 touch_state;
+        float x, y, pressure;
+        int result = SDL_GameControllerGetTouchpadFinger(pad, 0, finger, &touch_state, &x, &y, &pressure);
+        if(result == 0) {
+            jclass clazz = env->GetObjectClass(touchState);
+            jmethodID update_method = env->GetMethodID(clazz, "update", "(ZFF)V");
+            env->CallVoidMethod(touchState, update_method, touch_state == 0 ? JNI_FALSE : JNI_TRUE, x, y);
+        }
+    */
+
+    public SensorState getSensorStateFast() throws ControllerUnpluggedException {
+        ensureConnected();
+        if (!supportsSensors) {
+            return sensorState;
+        }
+        nativeGetSensorStateNoUpdate(controllerPtr, sensorState);
+        return sensorState;
+    }
+
+    private native void nativeGetSensorStateNoUpdate(long controllerPtr, Object sensorState);/*
+        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
+
+        float gyro_data[3], accel_data[3];
+        int resultGyro  = SDL_GameControllerGetSensorData(pad, SDL_SENSOR_GYRO,  &gyro_data[0], 3);
+        int resultAccel = SDL_GameControllerGetSensorData(pad, SDL_SENSOR_ACCEL, &accel_data[0], 3);
+
+        Uint64 microsecondsSinceEpoch =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()
+            ).count();
+
+        if(resultGyro == 0 && resultAccel == 0) {
+            jclass clazz = env->GetObjectClass(sensorState);
+            jmethodID update_method = env->GetMethodID(clazz, "update", "(FFFFFFJ)V");
+            env->CallVoidMethod(sensorState, update_method,
+                accel_data[0], accel_data[1], accel_data[2],
+                gyro_data[0], gyro_data[1], gyro_data[2],
+                microsecondsSinceEpoch
+            );
+        }
+    */
 }
