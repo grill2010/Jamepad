@@ -31,6 +31,7 @@ public class ControllerManager {
     #include "SDL.h"
 
     SDL_Event event;
+    static int lastNum = -1;
     */
 
     private static final boolean IS_UNIX = System.getProperty("os.name", "").toLowerCase().contains("nix") ||
@@ -446,15 +447,29 @@ public class ControllerManager {
         }
         return false;
     }
+
     private native boolean nativeControllerConnectedOrDisconnected(); /*
         SDL_JoystickUpdate();
+        SDL_PumpEvents();
+
         while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_JOYDEVICEADDED || event.type == SDL_JOYDEVICEREMOVED) {
+            if (event.type == SDL_JOYDEVICEADDED || event.type == SDL_JOYDEVICEREMOVED ||
+                event.type == SDL_CONTROLLERDEVICEADDED || event.type == SDL_CONTROLLERDEVICEREMOVED) {
                 return JNI_TRUE;
             }
         }
+
+        int nowNum = SDL_NumJoysticks();
+        if (lastNum < 0) lastNum = nowNum;
+
+        if (nowNum != lastNum) {
+            lastNum = nowNum;
+            return JNI_TRUE;
+        }
+
         return JNI_FALSE;
     */
+
 
     /**
      * This method adds mappings held in the specified file. The file is copied to the temp folder so
@@ -539,7 +554,12 @@ public class ControllerManager {
     */
 
     public native String getCurrentAudioDriverName(); /*
-        return env->NewStringUTF(SDL_GetError());
+    const char* drv = SDL_GetCurrentAudioDriver();
+    if (drv == NULL) {
+        // Return empty string
+        return env->NewStringUTF("");
+    }
+    return env->NewStringUTF(drv);
     */
 
     private boolean verifyInitialized() throws IllegalStateException {
