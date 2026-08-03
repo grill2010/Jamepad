@@ -321,74 +321,75 @@ public final class ControllerState implements Serializable {
 
     private ControllerState(ControllerIndex c) throws ControllerUnpluggedException {
         isConnected = true;
+        c.poll();
         controllerType = c.getName();
-        leftStickX = c.getAxisState(ControllerAxis.LEFTX);
-        leftStickY = c.getAxisState(ControllerAxis.LEFTY);
-        rightStickX = c.getAxisState(ControllerAxis.RIGHTX);
-        rightStickY = c.getAxisState(ControllerAxis.RIGHTY);
+        leftStickX = c.getAxisStateFast(ControllerAxis.LEFTX);
+        leftStickY = c.getAxisStateFast(ControllerAxis.LEFTY);
+        rightStickX = c.getAxisStateFast(ControllerAxis.RIGHTX);
+        rightStickY = c.getAxisStateFast(ControllerAxis.RIGHTY);
         leftStickAngle = (float) Math.toDegrees(Math.atan2(leftStickY, leftStickX));
         leftStickMagnitude = (float) Math.sqrt((leftStickX * leftStickX) + (leftStickY * leftStickY));
         rightStickAngle = (float) Math.toDegrees(Math.atan2(rightStickY, rightStickX));
         rightStickMagnitude = (float) Math.sqrt((rightStickX * rightStickX) + (rightStickY * rightStickY));
-        leftTrigger = c.getAxisState(ControllerAxis.TRIGGERLEFT);
-        rightTrigger = c.getAxisState(ControllerAxis.TRIGGERRIGHT);
+        leftTrigger = c.getAxisStateFast(ControllerAxis.TRIGGERLEFT);
+        rightTrigger = c.getAxisStateFast(ControllerAxis.TRIGGERRIGHT);
 
-        leftStickJustClicked = c.isButtonJustPressed(ControllerButton.LEFTSTICK);
-        rightStickJustClicked = c.isButtonJustPressed(ControllerButton.RIGHTSTICK);
-        leftStickClick = c.isButtonPressed(ControllerButton.LEFTSTICK);
-        rightStickClick = c.isButtonPressed(ControllerButton.RIGHTSTICK);
+        leftStickJustClicked = c.isButtonJustPressedFast(ControllerButton.LEFTSTICK);
+        rightStickJustClicked = c.isButtonJustPressedFast(ControllerButton.RIGHTSTICK);
+        leftStickClick = c.isButtonPressedFast(ControllerButton.LEFTSTICK);
+        rightStickClick = c.isButtonPressedFast(ControllerButton.RIGHTSTICK);
 
-        aJustPressed = c.isButtonJustPressed(ControllerButton.A);
-        bJustPressed = c.isButtonJustPressed(ControllerButton.B);
-        xJustPressed = c.isButtonJustPressed(ControllerButton.X);
-        yJustPressed = c.isButtonJustPressed(ControllerButton.Y);
-        lbJustPressed = c.isButtonJustPressed(ControllerButton.LEFTBUMPER);
-        rbJustPressed = c.isButtonJustPressed(ControllerButton.RIGHTBUMPER);
-        startJustPressed = c.isButtonJustPressed(ControllerButton.START);
-        backJustPressed = c.isButtonJustPressed(ControllerButton.BACK);
-        guideJustPressed = c.isButtonJustPressed(ControllerButton.GUIDE);
-        dpadUpJustPressed = c.isButtonJustPressed(ControllerButton.DPAD_UP);
-        dpadDownJustPressed = c.isButtonJustPressed(ControllerButton.DPAD_DOWN);
-        dpadLeftJustPressed = c.isButtonJustPressed(ControllerButton.DPAD_LEFT);
-        dpadRightJustPressed = c.isButtonJustPressed(ControllerButton.DPAD_RIGHT);
-        misc1JustPressed = c.isButtonJustPressed(ControllerButton.BUTTON_MISC1);
-        paddle1JustPressed = c.isButtonJustPressed(ControllerButton.BUTTON_PADDLE1);
-        paddle2JustPressed = c.isButtonJustPressed(ControllerButton.BUTTON_PADDLE2);
-        paddle3JustPressed = c.isButtonJustPressed(ControllerButton.BUTTON_PADDLE3);
-        paddle4JustPressed = c.isButtonJustPressed(ControllerButton.BUTTON_PADDLE4);
-        touchpadButtonJustPressed = c.isButtonJustPressed(ControllerButton.BUTTON_TOUCHPAD);
+        aJustPressed = c.isButtonJustPressedFast(ControllerButton.A);
+        bJustPressed = c.isButtonJustPressedFast(ControllerButton.B);
+        xJustPressed = c.isButtonJustPressedFast(ControllerButton.X);
+        yJustPressed = c.isButtonJustPressedFast(ControllerButton.Y);
+        lbJustPressed = c.isButtonJustPressedFast(ControllerButton.LEFTBUMPER);
+        rbJustPressed = c.isButtonJustPressedFast(ControllerButton.RIGHTBUMPER);
+        startJustPressed = c.isButtonJustPressedFast(ControllerButton.START);
+        backJustPressed = c.isButtonJustPressedFast(ControllerButton.BACK);
+        guideJustPressed = c.isButtonJustPressedFast(ControllerButton.GUIDE);
+        dpadUpJustPressed = c.isButtonJustPressedFast(ControllerButton.DPAD_UP);
+        dpadDownJustPressed = c.isButtonJustPressedFast(ControllerButton.DPAD_DOWN);
+        dpadLeftJustPressed = c.isButtonJustPressedFast(ControllerButton.DPAD_LEFT);
+        dpadRightJustPressed = c.isButtonJustPressedFast(ControllerButton.DPAD_RIGHT);
+        misc1JustPressed = c.isButtonJustPressedFast(ControllerButton.BUTTON_MISC1);
+        paddle1JustPressed = c.isButtonJustPressedFast(ControllerButton.BUTTON_PADDLE1);
+        paddle2JustPressed = c.isButtonJustPressedFast(ControllerButton.BUTTON_PADDLE2);
+        paddle3JustPressed = c.isButtonJustPressedFast(ControllerButton.BUTTON_PADDLE3);
+        paddle4JustPressed = c.isButtonJustPressedFast(ControllerButton.BUTTON_PADDLE4);
+        touchpadButtonJustPressed = c.isButtonJustPressedFast(ControllerButton.BUTTON_TOUCHPAD);
 
-        a = c.isButtonPressed(ControllerButton.A);
-        b = c.isButtonPressed(ControllerButton.B);
-        x = c.isButtonPressed(ControllerButton.X);
-        y = c.isButtonPressed(ControllerButton.Y);
-        lb = c.isButtonPressed(ControllerButton.LEFTBUMPER);
-        rb = c.isButtonPressed(ControllerButton.RIGHTBUMPER);
-        start = c.isButtonPressed(ControllerButton.START);
-        back = c.isButtonPressed(ControllerButton.BACK);
-        guide = c.isButtonPressed(ControllerButton.GUIDE);
-        dpadUp = c.isButtonPressed(ControllerButton.DPAD_UP);
-        dpadDown = c.isButtonPressed(ControllerButton.DPAD_DOWN);
-        dpadLeft = c.isButtonPressed(ControllerButton.DPAD_LEFT);
-        dpadRight = c.isButtonPressed(ControllerButton.DPAD_RIGHT);
-        misc1 = c.isButtonPressed(ControllerButton.BUTTON_MISC1);
-        paddle1 = c.isButtonPressed(ControllerButton.BUTTON_PADDLE1);
-        paddle2 = c.isButtonPressed(ControllerButton.BUTTON_PADDLE2);
-        paddle3 = c.isButtonPressed(ControllerButton.BUTTON_PADDLE3);
-        paddle4 = c.isButtonPressed(ControllerButton.BUTTON_PADDLE4);
-        touchpadButton = c.isButtonPressed(ControllerButton.BUTTON_TOUCHPAD);
+        a = c.isButtonPressedFast(ControllerButton.A);
+        b = c.isButtonPressedFast(ControllerButton.B);
+        x = c.isButtonPressedFast(ControllerButton.X);
+        y = c.isButtonPressedFast(ControllerButton.Y);
+        lb = c.isButtonPressedFast(ControllerButton.LEFTBUMPER);
+        rb = c.isButtonPressedFast(ControllerButton.RIGHTBUMPER);
+        start = c.isButtonPressedFast(ControllerButton.START);
+        back = c.isButtonPressedFast(ControllerButton.BACK);
+        guide = c.isButtonPressedFast(ControllerButton.GUIDE);
+        dpadUp = c.isButtonPressedFast(ControllerButton.DPAD_UP);
+        dpadDown = c.isButtonPressedFast(ControllerButton.DPAD_DOWN);
+        dpadLeft = c.isButtonPressedFast(ControllerButton.DPAD_LEFT);
+        dpadRight = c.isButtonPressedFast(ControllerButton.DPAD_RIGHT);
+        misc1 = c.isButtonPressedFast(ControllerButton.BUTTON_MISC1);
+        paddle1 = c.isButtonPressedFast(ControllerButton.BUTTON_PADDLE1);
+        paddle2 = c.isButtonPressedFast(ControllerButton.BUTTON_PADDLE2);
+        paddle3 = c.isButtonPressedFast(ControllerButton.BUTTON_PADDLE3);
+        paddle4 = c.isButtonPressedFast(ControllerButton.BUTTON_PADDLE4);
+        touchpadButton = c.isButtonPressedFast(ControllerButton.BUTTON_TOUCHPAD);
 
         if(c.isUsingSonyControllerFeatures()) {
             if(c.isSupportingTouchpadData()) {
                 touchStateFinger0 = new TouchState();
-                touchStateFinger0.update(c.getTouchpadFinger(0));
+                touchStateFinger0.update(c.getTouchpadFingerFast(0));
                 touchStateFinger1 = new TouchState();
-                touchStateFinger1.update(c.getTouchpadFinger(0));
+                touchStateFinger1.update(c.getTouchpadFingerFast(0));
             }
 
             if(c.isSupportingSensorData()) {
                 sensorState = new SensorState();
-                sensorState.update(c.getSensorState());
+                sensorState.update(c.getSensorStateFast());
             }
         }
     }

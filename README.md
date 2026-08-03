@@ -4,7 +4,7 @@
 
 *This is a fork of and based on the [original work by William Hartman](https://github.com/williamahartman/Jamepad/tree/ae170a95eb7c14d82b19328480b1ab5a45b77001)*.
 
-Jamepad is a library for using gamepads in Java. It's based on SDL2 ([here](https://www.libsdl.org/)) and uses jnigen ([more info here](https://github.com/libgdx/libgdx/wiki/jnigen)). We also use [this](https://github.com/gabomdq/SDL_GameControllerDB) really nice database of gamepad mappings.
+Jamepad is a library for using gamepads in Java. It's based on SDL 3 ([here](https://www.libsdl.org/)) and uses jnigen ([more info here](https://github.com/libgdx/libgdx/wiki/jnigen)). We also use [this](https://github.com/gabomdq/SDL_GameControllerDB) really nice database of gamepad mappings.
 
 Jamepad has:
   - One library that supports all platforms (Windows, OSX, and Linux)
@@ -19,6 +19,60 @@ This fork improved the following points compared to last real [Jamepad version 1
 * New features added, newer SDL version used
 * Natives are smaller in size
 * Natives for arm architecture included
+
+#### Upgrading from the SDL 2 versions of this fork
+
+The move to the SDL 3 gamepad API forced a few breaking changes:
+
+* `ControllerPowerLevel` no longer has charge buckets (`POWER_EMPTY`/`POWER_LOW`/...). SDL 3
+  reports a power *state* and a percentage separately, so the enum now mirrors
+  `SDL_PowerState` (`POWER_ON_BATTERY`, `POWER_CHARGING`, `POWER_CHARGED`, ...) and
+  `ControllerIndex.getBatteryPercentage()` returns the 0-100 charge (-1 if unknown).
+* `ControllerButton` gained `BUTTON_MISC2` through `BUTTON_MISC6`. `A`/`B`/`X`/`Y` still mean
+  the same physical buttons; SDL 3 calls them `SOUTH`/`EAST`/`WEST`/`NORTH`.
+* Motion sensors are no longer switched on by `Configuration.useSonyControllerFeatures`. Set
+  `Configuration.useControllerMotionSensors` instead, which works for every controller with
+  motion hardware rather than only Sony pads.
+* `SensorState.getTimestamp()` now returns the hardware sample time in **nanoseconds**. It
+  used to return microseconds since the Unix epoch. The new value comes from the driver, so
+  it tracks the real sampling interval, but its origin is arbitrary and only meaningful when
+  compared against other timestamps from the same source.
+* Jamepad now requires JDK 25 to build. The natives themselves are built for Windows 10+,
+  macOS 12+ and glibc 2.31+ (Ubuntu 20.04, Debian 11), on x86, x86_64, ARM32 and ARM64.
+
+#### Motion sensors
+
+Gyroscope and accelerometer support is off by default, because motion reporting noticeably
+increases how much a controller sends over USB or Bluetooth. Turn it on per manager:
+
+````java
+Configuration configuration = new Configuration();
+configuration.useControllerMotionSensors = true;
+
+ControllerManager manager = new ControllerManager(configuration);
+manager.initSDLGamepad();
+
+ControllerIndex controller = manager.getControllerIndex(0);
+if (controller.isSupportingSensorData()) {
+    SensorState state = controller.getSensorState();
+    // accelerometer in m/s^2 including gravity, gyroscope in rad/s
+}
+````
+
+This covers every controller SDL reports motion for, including DualShock 4 and DualSense
+pads, Switch Pro controllers and Joy-Cons, and the Steam Deck's built-in controller. A pad
+may have only one of the two sensors, so check `isSupportingAccelerometer()` and
+`isSupportingGyroscope()` if you care which axes are live.
+
+Handhelds whose IMU is not part of a gamepad, such as the ROG Ally or the Legion Go, expose
+it as a system sensor instead. Enable `Configuration.useSystemMotionSensors` and read it
+through `ControllerManager.getSystemMotionSensors()`. SDL only implements system sensors on
+Windows, Android and a few consoles, so check `isAvailable()` before relying on it. Because
+handhelds differ in how the IMU is physically mounted, you will usually still need your own
+per-device axis correction there.
+
+SDL does not provide fused orientation. If you need a quaternion, run the raw gyroscope and
+accelerometer readings through your own filter.
 
 #### Stuff You Should Know About Jamepad
 
@@ -48,7 +102,7 @@ Add this line to your dependencies section. Update the version number to whateve
 ````
 dependencies {
   ...
-  compile 'com.badlogicgames.jamepad:jamepad:2.0.14.0'
+  implementation 'com.badlogicgames.jamepad:jamepad:3.0.0.0'
 }
 ````
 ##### maven
@@ -60,7 +114,7 @@ Add this line to your dependencies section. Update the version number to whateve
     <dependency>
         <groupId>com.badlogicgames.jamepad</groupId>
         <artifactId>jamepad</artifactId>
-        <version>2.0.14.0</version>
+        <version>3.0.0.0</version>
     </dependency>
 </dependencies>
 ````
@@ -168,6 +222,6 @@ The original work by William Hartman is licensed under the permissive zLib licen
 You can include this use this library in proprietary projects without sharing source, and you are allowed to alter the project.
 The original license is kept [here](LICENSE_hartman.txt).
 
-libSDL 2.0 is [zLib licensed](https://libsdl.org/license.php), too.
+libSDL 3 is [zLib licensed](https://libsdl.org/license.php), too.
 
 Every work done in this fork is licensed under Apache 2 License conditions, see LICENSE file.

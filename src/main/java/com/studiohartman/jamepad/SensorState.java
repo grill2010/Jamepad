@@ -1,7 +1,15 @@
 package com.studiohartman.jamepad;
 
 /**
- * Contains information about the accelerometer and gyroscope data of the controller.
+ * A snapshot of the accelerometer and gyroscope readings of a motion source.
+ *
+ * <p>Values use SDL's units. The accelerometer reports metres per second squared including
+ * gravity, so a device lying flat and still reads roughly 9.81 on one axis. The gyroscope
+ * reports radians per second, positive in the direction of a right-handed rotation around
+ * the axis.
+ *
+ * <p>Axes follow SDL's convention, as seen from someone holding the device: +X points
+ * right, +Y points up, and +Z points towards the holder.
  */
 public class SensorState {
 
@@ -21,19 +29,23 @@ public class SensorState {
 
     private float gyroZ;
 
-    private long timestamp;
+    private long accelTimestamp;
+
+    private long gyroTimestamp;
 
     SensorState() {
     }
 
-    SensorState(float accelX, float accelY, float accelZ, float gyroX, float gyroY, float gyroZ, long timestamp) {
+    SensorState(float accelX, float accelY, float accelZ, float gyroX, float gyroY, float gyroZ,
+                long accelTimestamp, long gyroTimestamp) {
         this.accelX = accelX;
         this.accelY = accelY;
         this.accelZ = accelZ;
         this.gyroX = gyroX;
         this.gyroY = gyroY;
         this.gyroZ = gyroZ;
-        this.timestamp = timestamp;
+        this.accelTimestamp = accelTimestamp;
+        this.gyroTimestamp = gyroTimestamp;
     }
 
     public float getAccelX() {
@@ -60,18 +72,47 @@ public class SensorState {
         return gyroZ;
     }
 
+    /**
+     * The time the most recent of the two readings was taken, in nanoseconds.
+     *
+     * <p>This is the hardware timestamp SDL received with the sample, so it tracks the real
+     * sampling interval rather than the moment the application happened to poll. Its origin
+     * is driver defined and is not synchronised with the system clock, so only compare it
+     * against other timestamps from the same source. A reading is 0 until the first sample
+     * of that kind arrives.
+     *
+     * @return the newer of {@link #getAccelTimestamp()} and {@link #getGyroTimestamp()}
+     */
     public long getTimestamp() {
-        return timestamp;
+        return Math.max(accelTimestamp, gyroTimestamp);
     }
 
-    void update(float accelX, float accelY, float accelZ, float gyroX, float gyroY, float gyroZ, long timestamp) {
+    /**
+     * The time the accelerometer reading was taken, in nanoseconds, or 0 if no accelerometer
+     * sample has arrived yet. See {@link #getTimestamp()} for how to interpret the value.
+     */
+    public long getAccelTimestamp() {
+        return accelTimestamp;
+    }
+
+    /**
+     * The time the gyroscope reading was taken, in nanoseconds, or 0 if no gyroscope sample
+     * has arrived yet. See {@link #getTimestamp()} for how to interpret the value.
+     */
+    public long getGyroTimestamp() {
+        return gyroTimestamp;
+    }
+
+    void update(float accelX, float accelY, float accelZ, float gyroX, float gyroY, float gyroZ,
+                long accelTimestamp, long gyroTimestamp) {
         this.accelX = accelX;
         this.accelY = accelY;
         this.accelZ = accelZ;
         this.gyroX = gyroX;
         this.gyroY = gyroY;
         this.gyroZ = gyroZ;
-        this.timestamp = timestamp;
+        this.accelTimestamp = accelTimestamp;
+        this.gyroTimestamp = gyroTimestamp;
     }
 
     void update(SensorState sensorState) {
@@ -81,6 +122,7 @@ public class SensorState {
         this.gyroX = sensorState.gyroX;
         this.gyroY = sensorState.gyroY;
         this.gyroZ = sensorState.gyroZ;
-        this.timestamp = sensorState.timestamp;
+        this.accelTimestamp = sensorState.accelTimestamp;
+        this.gyroTimestamp = sensorState.gyroTimestamp;
     }
 }

@@ -6,179 +6,205 @@ on:
 
 env:
   GRADLE_USER_HOME: .gradle
-  # Needed in order to use Node 16. Node 20 does not work with glibc 2.17
-  # See https://github.blog/changelog/2024-03-07-github-actions-all-actions-will-run-on-node20-instead-of-node16-by-default/
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
 jobs:
   macos:
     runs-on: macos-latest
     steps:
     - uses: actions/checkout@v4
-      with:
-        submodules: 'recursive'
 
-    - name: Set up JDK 8
-      uses: actions/setup-java@v3
+    - name: Validate Gradle wrapper
+      uses: gradle/actions/wrapper-validation@v4
+
+    - name: Check out submodules
+      run: git submodule update --init --recursive --depth 1
+
+    - name: Set up JDK 25
+      uses: actions/setup-java@v4
       with:
         distribution: 'zulu'
-        java-version: 8
+        java-version: 25
 
     - name: Setup Gradle
-      uses: gradle/gradle-build-action@v2.4.2
-
-    - run: mkdir -p SDL/build-macosarm64
-    # No --disable-video for macOS https://gitweb.gentoo.org/repo/gentoo.git/commit/?id=c70c727c98b24ad8b44e05285b8785be15062af0
-    - run: ../configure --host=aarch64-apple-darwin CFLAGS="-arch arm64 -fPIC -mmacosx-version-min=10.7" CPPFLAGS="-arch arm64 -fPIC -mmacosx-version-min=10.7" LDFLAGS="-arch arm64 -mmacosx-version-min=10.7" --enable-audio --disable-video-vulkan --disable-render --disable-filesystem --disable-threads --disable-directx --disable-mmx --disable-3dnow --disable-sse --disable-sse2 --disable-sse3 --disable-cpuinfo --enable-sensor --enable-hidapi --disable-joystick-mfi
-      working-directory: SDL/build-macosarm64
-    - run: make -j
-      working-directory: SDL/build-macosarm64
-
-    - run: mkdir -p SDL/build-macos64
-    # No --disable-video for macOS https://gitweb.gentoo.org/repo/gentoo.git/commit/?id=c70c727c98b24ad8b44e05285b8785be15062af0
-    - run: ../configure CFLAGS="-arch x86_64 -fPIC -mmacosx-version-min=10.7" CPPFLAGS="-arch x86_64 -fPIC -mmacosx-version-min=10.7" LDFLAGS="-arch x86_64 -mmacosx-version-min=10.7" --enable-audio --disable-video-vulkan --disable-render --disable-filesystem --disable-threads --disable-directx --disable-mmx --disable-3dnow --disable-sse --disable-sse2 --disable-sse3 --disable-cpuinfo --enable-sensor --enable-hidapi --disable-joystick-mfi
-      working-directory: SDL/build-macos64
-    - run: make -j
-      working-directory: SDL/build-macos64
-    - run: sudo make install
-      working-directory: SDL/build-macos64
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        validate-wrappers: false
 
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
-    - name: Build with Gradle
-      run: ./gradlew jnigen jnigenBuild
+
+    # Gradle configures, builds and installs a static SDL 3 per target via CMake
+    # before it compiles the natives, so there are no configure/make steps here.
+    - name: Build macOS natives
+      run: ./gradlew jnigen jnigenBuildAllMacOsX
+
     - name: Upload macOS natives
       uses: actions/upload-artifact@v4
       with:
         name: macos-natives
-        path: libs
+        path: build/jnigen/libs
 
   linux:
     needs: macos
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+    # glibc 2.31, which is what Ubuntu 20.04 ships. The natives pick up the glibc of
+    # whatever builds them, so this image sets the oldest distro Jamepad still runs on.
+    # Building on 22.04 raises that floor to glibc 2.34, because 2.34 folded libpthread
+    # into libc and retagged its symbols, and SDL always pulls in threads.
     container: ubuntu:20.04
     env:
+      DEBIAN_FRONTEND: noninteractive
       ORG_GRADLE_PROJECT_GITHUB_USERNAME: ""
       ORG_GRADLE_PROJECT_GITHUB_API_TOKEN: ""
     steps:
-    - name: Install dependencies into minimal dockerfile
+    - name: Install base dependencies
       run: |
-        # ubuntu dockerfile is very minimal (only 122 packages are installed)
-        # need to install updated git (from official git ppa)
-        apt update
-        apt install -y software-properties-common
-        add-apt-repository ppa:git-core/ppa -y
-        # install dependencies expected by other steps
-        apt update
-        apt install -y git \
-        curl \
-        ca-certificates \
-        wget \
-        bzip2 \
-        zip \
-        unzip \
-        xz-utils \
-        openjdk-11-jdk-headless \
-        maven \
-        build-essential \
-        ant sudo locales
-        # set Locale to en_US.UTF-8 (avoids hang during compilation)
+        set -e
+        # Focal is past its standard end of life but stays on archive.ubuntu.com for the
+        # ESM window, so the image's default sources work. Do not rewrite them to
+        # old-releases.ubuntu.com, which does not carry focal and 404s on every pocket.
+        # The ubuntu image is very minimal, so everything the later steps assume
+        # has to be installed first. Everything runs as root, hence no sudo.
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          software-properties-common \
+          ca-certificates \
+          git curl wget \
+          zip unzip xz-utils bzip2 \
+          build-essential \
+          pkg-config \
+          gnupg \
+          locales
         locale-gen en_US.UTF-8
         echo "LANG=en_US.UTF-8" >> $GITHUB_ENV
         echo "LANGUAGE=en_US.UTF-8" >> $GITHUB_ENV
         echo "LC_ALL=en_US.UTF-8" >> $GITHUB_ENV
-    - uses: actions/checkout@v3
+
+    # Focal only packages CMake 3.16.3, which is exactly SDL's stated minimum and
+    # leaves no room, so use an official upstream build instead.
+    - name: Install CMake
+      run: |
+        set -e
+        curl -fsSL -o /tmp/cmake.tar.gz \
+          https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz
+        mkdir -p /opt/cmake
+        tar -xzf /tmp/cmake.tar.gz -C /opt/cmake --strip-components=1
+        echo "/opt/cmake/bin" >> $GITHUB_PATH
+        /opt/cmake/bin/cmake --version
+
+    - uses: actions/checkout@v4
       with:
         submodules: 'recursive'
 
-    - name: Set up JDK 8
-      uses: actions/setup-java@v3
+    - name: Set up JDK 25
+      uses: actions/setup-java@v4
       with:
         distribution: 'zulu'
-        java-version: 8
+        java-version: 25
 
     - name: Setup Gradle
-      uses: gradle/gradle-build-action@v2.4.2
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        validate-wrappers: false
 
-    - run: sudo sed -i 's/deb http/deb [arch=amd64,i386] http/' /etc/apt/sources.list
-    - run: grep "ubuntu.com/ubuntu" /etc/apt/sources.list | sudo tee /etc/apt/sources.list.d/ports.list
-    - run: sudo sed -i 's/amd64,i386/armhf,arm64/' /etc/apt/sources.list.d/ports.list
-    - run: sudo sed -i 's#http://.*/ubuntu#http://ports.ubuntu.com/ubuntu-ports#' /etc/apt/sources.list.d/ports.list
-    - name: Add extra platform architectures
-      run: sudo dpkg --add-architecture i386; sudo dpkg --add-architecture armhf; sudo dpkg --add-architecture arm64
-    - run: sudo apt-get update
-    - name: Install Windows compilers
-      run: sudo apt-get -yq install g++-mingw-w64-i686 g++-mingw-w64-x86-64
-    - name: Install Linux x86 compilers/libraries
-      run: sudo apt-get -yq install gcc-multilib g++-multilib linux-libc-dev:i386
-    - name: Install Linux arm32 compilers/libraries
-      run: sudo apt-get -yq install gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf binutils-arm-linux-gnueabihf
-    - name: Install Linux arm64 compilers/libraries
-      run: sudo apt-get -yq install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu
+    # i386 is the only foreign architecture needed, and the ubuntu mirror carries it.
+    # The ARM cross toolchains are ordinary amd64 packages, so registering armhf/arm64
+    # with dpkg and adding ports.ubuntu.com bought nothing and left apt unable to
+    # resolve the gcc-<n>-{aarch64-linux-gnu,arm-linux-gnueabihf} packages at all.
+    - name: Enable i386 packages
+      run: |
+        set -e
+        dpkg --add-architecture i386
+        apt-get update
+
+    - name: Install Windows and 32-bit x86 compilers
+      run: |
+        set -e
+        apt-get install -y --no-install-recommends \
+          g++-mingw-w64-i686 g++-mingw-w64-x86-64 \
+          gcc-multilib g++-multilib linux-libc-dev:i386
+
+    - name: Install ARM cross compilers
+      run: |
+        # The versioned packages rather than the gcc-<triplet> metapackages, which apt
+        # in this image cannot resolve. libc6-dev-*-cross is only ever a recommendation,
+        # and the compilers have no libc headers at all without it.
+        # Focal's newest cross compiler is 10; it has no gcc-11-*-cross packages.
+        apt-get install -y --no-install-recommends \
+          gcc-10-arm-linux-gnueabihf g++-10-arm-linux-gnueabihf \
+          binutils-arm-linux-gnueabihf libc6-dev-armhf-cross \
+          gcc-10-aarch64-linux-gnu g++-10-aarch64-linux-gnu \
+          binutils-aarch64-linux-gnu libc6-dev-arm64-cross
+        # Those metapackages contain essentially nothing but the unversioned symlinks,
+        # and jnigen invokes the compilers as <triplet>-gcc / <triplet>-g++, so put them
+        # back by hand.
+        for triplet in arm-linux-gnueabihf aarch64-linux-gnu; do
+          ln -sf "/usr/bin/$triplet-gcc-10" "/usr/bin/$triplet-gcc"
+          ln -sf "/usr/bin/$triplet-g++-10" "/usr/bin/$triplet-g++"
+        done
+
+    - name: Install SDL build dependencies
+      run: |
+        set -e
+        # SDL dlopens all of these at runtime, so only their headers end up mattering
+        # and the native packages serve every target. Nothing here reaches the link
+        # line, which is why the 32-bit and ARM builds can use them too.
+        # Focal itself only carries PipeWire 0.2, which SDL cannot use, so the 0.3
+        # headers come from the same upstream PPA the pre-SDL3 builds used. Without it
+        # the natives lose the PipeWire audio backend, and DualSense audio haptics fall
+        # back to the PulseAudio compatibility layer.
+        add-apt-repository -y ppa:pipewire-debian/pipewire-upstream
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          libasound2-dev \
+          libpulse-dev \
+          libpipewire-0.3-dev \
+          libjack-dev \
+          libsndio-dev \
+          libudev-dev
+        # Fail loudly rather than silently shipping without PipeWire, which is exactly
+        # the kind of regression that is invisible until a user reports missing haptics.
+        pkg-config --exists libpipewire-0.3
+        echo "PipeWire headers: $(pkg-config --modversion libpipewire-0.3)"
+
     - name: Download macOS natives
       uses: actions/download-artifact@v4
       with:
         name: macos-natives
-        path: libs
-
-    - run: find -type f -name "*.h" -exec sed -i 's/extern DECLSPEC//' {} \;
-      working-directory: SDL
-    - run: sed -i 's/#define SDL_DYNAMIC_API 1/#define SDL_DYNAMIC_API 0/' SDL/src/dynapi/SDL_dynapi.h
-
-    - run: mkdir -p SDL/build-linux64
-    - run: ../configure CFLAGS="-fPIC" CPPFLAGS="-fPIC" --disable-video --disable-video-vulkan --disable-render --disable-filesystem --disable-threads --disable-directx --disable-mmx --disable-3dnow --disable-sse --disable-sse2 --disable-sse3 --disable-cpuinfo --enable-sensor --enable-hidapi
-      working-directory: SDL/build-linux64
-    - run: make -j
-      working-directory: SDL/build-linux64
-
-    - run: mkdir -p SDL/build-linux32
-    - run: ../configure CFLAGS="-fPIC -m32" CPPFLAGS="-fPIC -m32" LDFLAGS="-m32" --disable-video --disable-video-vulkan --disable-render --disable-filesystem --disable-threads --disable-directx --disable-mmx --disable-3dnow --disable-sse --disable-sse2 --disable-sse3 --disable-cpuinfo --enable-sensor --enable-hidapi
-      working-directory: SDL/build-linux32
-    - run: make -j
-      working-directory: SDL/build-linux32
-
-    - run: mkdir -p SDL/build-linuxarm32
-    - run: ../configure --host=arm-linux-gnueabihf CFLAGS="-fPIC" CPPFLAGS="-fPIC" --enable-audio --disable-video --disable-video-vulkan --disable-render --disable-filesystem --disable-threads --disable-directx --disable-mmx --disable-3dnow --disable-sse --disable-sse2 --disable-sse3 --disable-cpuinfo --enable-sensor --enable-hidapi
-      working-directory: SDL/build-linuxarm32
-    - run: make -j
-      working-directory: SDL/build-linuxarm32
-
-    - run: mkdir -p SDL/build-linuxarm64
-    - run: ../configure --host=aarch64-linux-gnu CFLAGS="-fPIC" CPPFLAGS="-fPIC" --enable-audio --disable-video --disable-video-vulkan --disable-render --disable-filesystem --disable-threads --disable-directx --disable-mmx --disable-3dnow --disable-sse --disable-sse2 --disable-sse3 --disable-cpuinfo --enable-sensor --enable-hidapi
-      working-directory: SDL/build-linuxarm64
-    - run: make -j
-      working-directory: SDL/build-linuxarm64
-
-    - run: mkdir -p SDL/build-windows32
-    - run: ../configure --host=i686-w64-mingw32 --disable-render --disable-power --disable-filesystem --enable-hidapi --enable-audio
-      working-directory: SDL/build-windows32
-    - run: make -j
-      working-directory: SDL/build-windows32
-
-    - run: mkdir -p SDL/build-windows64
-    - run: ../configure --host=x86_64-w64-mingw32 --disable-render --disable-power --disable-filesystem --enable-hidapi --enable-audio
-      working-directory: SDL/build-windows64
-    - run: make -j
-      working-directory: SDL/build-windows64
+        path: build/jnigen/libs
 
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
-    - name: Build with Gradle
-      run: ./gradlew jnigen jnigenBuild jnigenJarNativesDesktop
+
+    - name: Build Windows and Linux natives
+      run: ./gradlew jnigen jnigenBuildAllWindows jnigenBuildAllLinux
+
+    - name: Package natives and build the jars
+      run: ./gradlew build jnigenPackageAllDesktop
+
+    # build/jnigen/libs holds the loose natives for every platform (the macOS ones
+    # were downloaded above); build/libs holds jamepad.jar and the natives-desktop jar.
     - name: Upload all output libs
       uses: actions/upload-artifact@v4
       with:
         name: output-libs
-        path: build/libs/
+        path: |
+          build/jnigen/libs
+          build/libs
+
     - name: Import GPG key
       id: import_gpg
-      uses: crazy-max/ghaction-import-gpg@v5
+      uses: crazy-max/ghaction-import-gpg@v6
       with:
         gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
         passphrase: ${{ secrets.GPG_PASSPHRASE }}
+
     - name: Release build deploy
       env:
         NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
         NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
-      run:
-        ./gradlew build publish -PRELEASE -Psigning.gnupg.keyId=${{ secrets.GPG_KEYID }} -Psigning.gnupg.passphrase=${{ secrets.GPG_PASSPHRASE }} -Psigning.gnupg.keyName=${{ secrets.GPG_KEYID }}
+      run: >
+        ./gradlew build publish -PRELEASE
+        -Psigning.gnupg.keyId=${{ secrets.GPG_KEYID }}
+        -Psigning.gnupg.passphrase=${{ secrets.GPG_PASSPHRASE }}
+        -Psigning.gnupg.keyName=${{ secrets.GPG_KEYID }}

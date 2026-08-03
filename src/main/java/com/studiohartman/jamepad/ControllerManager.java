@@ -1,6 +1,6 @@
 package com.studiohartman.jamepad;
 
-import com.badlogic.gdx.utils.SharedLibraryLoader;
+import com.badlogic.gdx.jnigen.loader.SharedLibraryLoader;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -28,10 +28,37 @@ import java.util.Objects;
 public class ControllerManager {
     /*JNI
 
-    #include "SDL.h"
+    #include <SDL3/SDL.h>
+    #include <stdio.h>
 
-    SDL_Event event;
-    static int lastNum = -1;
+    static int lastGamepadCount = -1;
+
+    static int jamepad_count_gamepads() {
+        int count = 0;
+        SDL_JoystickID *ids = SDL_GetGamepads(&count);
+        if (ids != NULL) {
+            SDL_free(ids);
+        }
+        return count;
+    }
+
+    // Pulls only device add/remove events off the queue. Draining the whole queue
+    // would eat events belonging to any other SDL user in the process.
+    static bool jamepad_take_device_events() {
+        SDL_Event drained[32];
+        bool sawAny = false;
+
+        while (SDL_PeepEvents(drained, 32, SDL_GETEVENT,
+                              SDL_EVENT_JOYSTICK_ADDED, SDL_EVENT_JOYSTICK_REMOVED) > 0) {
+            sawAny = true;
+        }
+        while (SDL_PeepEvents(drained, 32, SDL_GETEVENT,
+                              SDL_EVENT_GAMEPAD_ADDED, SDL_EVENT_GAMEPAD_REMOVED) > 0) {
+            sawAny = true;
+        }
+
+        return sawAny;
+    }
     */
 
     private static final boolean IS_UNIX = System.getProperty("os.name", "").toLowerCase().contains("nix") ||
@@ -41,6 +68,7 @@ public class ControllerManager {
     private final String mappingsPath;
     private boolean isInitialized;
     private ControllerIndex[] controllers;
+    private SystemMotionSensors systemMotionSensors;
 
     /**
      * Default constructor. Makes a manager for 4 controllers with the built in mappings from here:
@@ -87,7 +115,7 @@ public class ControllerManager {
     }
 
     private native boolean nativeSetSdlHint(String name, String value); /*
-        return SDL_SetHint(name, value) == SDL_TRUE ? JNI_TRUE : JNI_FALSE;
+        return SDL_SetHint(name, value) ? JNI_TRUE : JNI_FALSE;
     */
 
     /**
@@ -103,10 +131,15 @@ public class ControllerManager {
         Configuration.SonyControllerFeature sonyControllerFeature = configuration.useSonyControllerFeatures;
 
         //Initialize SDL
-        if (!nativeInitSDLGamepad(!configuration.useRawInput, sonyControllerFeature.getValue())) {
+        if (!nativeInitSDLGamepad(!configuration.useRawInput, sonyControllerFeature.getValue(),
+                configuration.useControllerMotionSensors, configuration.useSystemMotionSensors)) {
             throw new IllegalStateException("Failed to initialize SDL in native method!");
         } else {
             isInitialized = true;
+        }
+
+        if (configuration.useSystemMotionSensors) {
+            systemMotionSensors = new SystemMotionSensors();
         }
 
         if(Objects.equals(Configuration.SonyControllerFeature.DUALSENSE_FEATURES_AND_HAPTICS, sonyControllerFeature)) {
@@ -139,30 +172,48 @@ public class ControllerManager {
 
         //Connect and keep track of the controllers
         for(int i = 0; i < controllers.length; i++) {
-            controllers[i] = new ControllerIndex(i, sonyControllerFeature);
+            controllers[i] = new ControllerIndex(i, sonyControllerFeature, configuration.useControllerMotionSensors);
         }
     }
-    private native boolean nativeInitSDLGamepad(boolean disableRawInput, int sonyControllerFeature); /*
+    private native boolean nativeInitSDLGamepad(boolean disableRawInput, int sonyControllerFeature,
+                                                boolean useControllerMotionSensors,
+                                                boolean useSystemMotionSensors); /*
         if (disableRawInput) {
             SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
         }
+        if (useControllerMotionSensors) {
+            // Motion data arrives in the extended report, which some drivers only send once asked.
+            SDL_SetHint(SDL_HINT_JOYSTICK_ENHANCED_REPORTS, "1");
+        }
         if(sonyControllerFeature != 0) {
-            SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, "1");
-            SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
+            // SDL 3 folded SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE and ..._PS5_RUMBLE into this one hint.
+            SDL_SetHint(SDL_HINT_JOYSTICK_ENHANCED_REPORTS, "1");
             SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4, "1");
             SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "1");
             SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_PLAYER_LED, "1");
             SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
         }
 
-        if (SDL_Init(SDL_INIT_EVENTS | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) != 0) {
+        SDL_InitFlags initFlags = SDL_INIT_EVENTS | SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD;
+        if (useSystemMotionSensors) {
+            initFlags |= SDL_INIT_SENSOR;
+        }
+
+        if (!SDL_Init(initFlags)) {
             printf("NATIVE METHOD: SDL_Init failed: %s\n", SDL_GetError());
             return JNI_FALSE;
         }
 
-        //We don't want any controller connections events (which are automatically generated at init)
-        //since they interfere with us detecting new controllers, so we go through all events and clear them.
-        while (SDL_PollEvent(&event));
+        //Sensor updates are high frequency. Nobody drains them unless motion is switched on,
+        //so keep them off the queue entirely in that case.
+        SDL_SetEventEnabled(SDL_EVENT_GAMEPAD_SENSOR_UPDATE, useControllerMotionSensors);
+        SDL_SetEventEnabled(SDL_EVENT_SENSOR_UPDATE, useSystemMotionSensors);
+
+        //SDL emits a device-added event for every controller that is already plugged in,
+        //which would otherwise look like a hotplug the first time update() runs.
+        SDL_PumpEvents();
+        jamepad_take_device_events();
+        lastGamepadCount = jamepad_count_gamepads();
 
         return JNI_TRUE;
     */
@@ -171,37 +222,26 @@ public class ControllerManager {
         if(SDL_WasInit(SDL_INIT_AUDIO) != 0) {
             return JNI_TRUE;
         }
-        SDL_SetHint("SDL_AUDIODRIVER", audioDriverName);
+        SDL_SetHint(SDL_HINT_AUDIO_DRIVER, audioDriverName);
 
-        if (SDL_Init(SDL_INIT_AUDIO) < 0) {
-            return JNI_FALSE;
-        }
-
-        return JNI_TRUE;
+        return SDL_InitSubSystem(SDL_INIT_AUDIO) ? JNI_TRUE : JNI_FALSE;
     */
 
     private native boolean nativeInitHaptics(); /*
         if(SDL_WasInit(SDL_INIT_AUDIO) != 0) {
             return JNI_TRUE;
         }
-        if (SDL_Init(SDL_INIT_AUDIO) < 0) {
-            return JNI_FALSE;
-        }
 
-        return JNI_TRUE;
+        return SDL_InitSubSystem(SDL_INIT_AUDIO) ? JNI_TRUE : JNI_FALSE;
     */
 
     private native boolean nativeInitHapticsOnUnix(); /*
         if(SDL_WasInit(SDL_INIT_AUDIO) != 0) {
             return JNI_TRUE;
         }
-        SDL_SetHint("SDL_AUDIODRIVER", "pipewire"); // Seems to work better with controller haptics
+        SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "pipewire"); // Seems to work better with controller haptics
 
-        if (SDL_Init(SDL_INIT_AUDIO) < 0) {
-            return JNI_FALSE;
-        }
-
-        return JNI_TRUE;
+        return SDL_InitSubSystem(SDL_INIT_AUDIO) ? JNI_TRUE : JNI_FALSE;
     */
 
     /**
@@ -211,6 +251,10 @@ public class ControllerManager {
         for(ControllerIndex c: controllers) {
             c.close();
         }
+        if (systemMotionSensors != null) {
+            systemMotionSensors.close();
+            systemMotionSensors = null;
+        }
         nativeCloseSDLGamepad();
         controllers = new ControllerIndex[0];
         isInitialized = false;
@@ -218,6 +262,21 @@ public class ControllerManager {
     private native void nativeCloseSDLGamepad(); /*
         SDL_Quit();
     */
+
+    /**
+     * The motion sensors built into this machine, for handhelds whose IMU is not part of a
+     * gamepad. Requires {@link Configuration#useSystemMotionSensors}.
+     *
+     * <p>Controllers that report their own motion, including the Steam Deck, are read
+     * through {@link ControllerIndex#getSensorState()} instead.
+     *
+     * @return the system sensors, or null if they were not requested
+     * @throws IllegalStateException if Jamepad was not initialized
+     */
+    public SystemMotionSensors getSystemMotionSensors() throws IllegalStateException {
+        verifyInitialized();
+        return systemMotionSensors;
+    }
 
     /**
      * Return the state of a controller at the passed index. This is probably the way most people
@@ -415,17 +474,7 @@ public class ControllerManager {
         return nativeGetNumRollers();
     }
     private native int nativeGetNumRollers(); /*
-        int numJoysticks = SDL_NumJoysticks();
-
-        int numGamepads = 0;
-
-        for(int i = 0; i < numJoysticks; i++) {
-            if(SDL_IsGameController(i)) {
-                numGamepads++;
-            }
-        }
-
-        return numGamepads;
+        return jamepad_count_gamepads();
     */
 
     /**
@@ -449,25 +498,21 @@ public class ControllerManager {
     }
 
     private native boolean nativeControllerConnectedOrDisconnected(); /*
-        SDL_JoystickUpdate();
+        SDL_UpdateGamepads();
         SDL_PumpEvents();
 
-        while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_JOYDEVICEADDED || event.type == SDL_JOYDEVICEREMOVED ||
-                event.type == SDL_CONTROLLERDEVICEADDED || event.type == SDL_CONTROLLERDEVICEREMOVED) {
-                return JNI_TRUE;
-            }
+        bool changed = jamepad_take_device_events();
+
+        int nowNum = jamepad_count_gamepads();
+        if (lastGamepadCount < 0) {
+            lastGamepadCount = nowNum;
+        }
+        if (nowNum != lastGamepadCount) {
+            lastGamepadCount = nowNum;
+            changed = true;
         }
 
-        int nowNum = SDL_NumJoysticks();
-        if (lastNum < 0) lastNum = nowNum;
-
-        if (nowNum != lastNum) {
-            lastNum = nowNum;
-            return JNI_TRUE;
-        }
-
-        return JNI_FALSE;
+        return changed ? JNI_TRUE : JNI_FALSE;
     */
 
 
@@ -519,7 +564,7 @@ public class ControllerManager {
     }
 
     private native boolean nativeAddMappingsFromFile(String path); /*
-        if(SDL_GameControllerAddMappingsFromFile(path) < 0) {
+        if(SDL_AddGamepadMappingsFromFile(path) < 0) {
             printf("NATIVE METHOD: Failed to load mappings from \"%s\"\n", path);
             printf("               %s\n", SDL_GetError());
             return JNI_FALSE;
@@ -529,16 +574,17 @@ public class ControllerManager {
     */
 
     private native boolean nativeAddMappingsFromBuffer(byte[] buffer, int length); /*
-        SDL_RWops *rw = SDL_RWFromMem(buffer, length);
+        SDL_IOStream *io = SDL_IOFromMem(buffer, (size_t) length);
 
-        if(rw == NULL) {
-            printf("NATIVE METHOD: Failed to create SDL_RWFromMem");
+        if(io == NULL) {
+            printf("NATIVE METHOD: Failed to create SDL_IOFromMem\n");
             printf("               %s\n", SDL_GetError());
             return JNI_FALSE;
         }
 
-        if(SDL_GameControllerAddMappingsFromRW(rw, 1) < 0) {
-            printf("NATIVE METHOD: Failed to load mappings from SDL_RWFromMem");
+        //Closes the stream for us, on success and on failure alike.
+        if(SDL_AddGamepadMappingsFromIO(io, true) < 0) {
+            printf("NATIVE METHOD: Failed to load mappings from SDL_IOFromMem\n");
             printf("               %s\n", SDL_GetError());
             return JNI_FALSE;
         }
@@ -564,7 +610,7 @@ public class ControllerManager {
 
     private boolean verifyInitialized() throws IllegalStateException {
         if(!isInitialized) {
-            throw new IllegalStateException("SDL_GameController is not initialized!");
+            throw new IllegalStateException("The SDL gamepad subsystem is not initialized!");
         }
         return true;
     }

@@ -1,71 +1,80 @@
-apply plugin: 'maven-publish'
-apply plugin: 'signing'
+// The jnigen plugin registers its own "jniPlatform" publication (jamepad-platform,
+// carrying the natives-desktop artifact) once all projects are evaluated. This file
+// adds the plain "mavenJava" publication for the Java library and gives both of them
+// the POM metadata and signatures Maven Central requires.
 
-afterEvaluate { project ->
-    publishing {
-        publications {
-            mavenJava(MavenPublication) {
-                artifactId = "jamepad"
-                from components.java
-                versionMapping {
-                    usage('java-api') {
-                        fromResolutionOf('runtimeClasspath')
-                    }
-                    usage('java-runtime') {
-                        fromResolutionResult()
-                    }
+def configurePom = { pom ->
+    pom.name = POM_NAME
+    pom.description = POM_DESCRIPTION
+    pom.url = POM_URL
+    pom.licenses {
+        license {
+            name = POM_LICENCE_NAME
+            url = POM_LICENCE_URL
+            distribution = POM_LICENCE_DIST
+        }
+    }
+    pom.developers {
+        developer {
+            id = "Tomski"
+            name = "Tom Wojciechowski"
+            email = "tomwojciechowski@asidik.com"
+        }
+    }
+    pom.scm {
+        connection = POM_SCM_CONNECTION
+        developerConnection = POM_SCM_DEV_CONNECTION
+        url = POM_SCM_URL
+    }
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            artifactId = "jamepad"
+            from components.java
+            versionMapping {
+                usage("java-api") {
+                    fromResolutionOf("runtimeClasspath")
                 }
-                pom {
-                    name = POM_NAME
-                    description = POM_DESCRIPTION
-                    url = POM_URL
-                    licenses {
-                        license {
-                            name = POM_LICENCE_NAME
-                            url = POM_LICENCE_URL
-                            distribution = POM_LICENCE_DIST
-                        }
-                    }
-                    developers {
-                        developer {
-                            id = "Tomski"
-                            name = "Tom Wojciechowski"
-                            email = "tomwojciechowski@asidik.com"
-                        }
-                    }
-                    scm {
-                        connection = POM_SCM_CONNECTION
-                        developerConnection = POM_SCM_DEV_CONNECTION
-                        url = POM_SCM_URL
-                    }
+                usage("java-runtime") {
+                    fromResolutionResult()
                 }
             }
+            pom { configurePom(it) }
         }
+    }
 
-        repositories {
-            maven {
-                url = version.endsWith('SNAPSHOT') ? getSnapshotRepositoryUrl() : getReleaseRepositoryUrl()
-                
-                if (getRepositoryUsername() || getRepositoryPassword())
-                {
-                    credentials {
-                        username = getRepositoryUsername()
-                        password = getRepositoryPassword()
-                    }
+    repositories {
+        maven {
+            url = version.endsWith("SNAPSHOT") ? getSnapshotRepositoryUrl() : getReleaseRepositoryUrl()
+
+            if (getRepositoryUsername() || getRepositoryPassword()) {
+                credentials {
+                    username = getRepositoryUsername()
+                    password = getRepositoryPassword()
                 }
             }
         }
     }
+}
 
-    signing {
-        useGpgCmd()
-        sign publishing.publications.mavenJava
+// jniPlatform shows up after this script runs, so react to publications as they appear
+// instead of iterating a snapshot.
+publishing.publications.configureEach { publication ->
+    if (publication.name == "jniPlatform") {
+        publication.pom { configurePom(it) }
     }
+    signing.sign(publication)
+}
 
-    //Simply using "required" in signing block doesn't work because taskGraph isn't ready yet.
-    gradle.taskGraph.whenReady {
-        tasks.withType(Sign) {
-            onlyIf { isReleaseBuild() }
-        }
+signing {
+    useGpgCmd()
+}
+
+// "required" in the signing block is evaluated too early to see the task graph.
+gradle.taskGraph.whenReady {
+    tasks.withType(Sign).configureEach {
+        onlyIf { isReleaseBuild() }
     }
 }

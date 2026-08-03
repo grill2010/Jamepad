@@ -1,42 +1,65 @@
 package com.studiohartman.jamepad;
 
 /**
- * This is an enumerated type for power level of controllers.
+ * The power state of a controller, derived from enum SDL_PowerState in SDL_power.h.
  * <p>
- * Derived from enum SDL_JoystickPowerLevel in SDL_joystick.h.
+ * SDL 3 dropped the bucketed {@code SDL_JoystickPowerLevel} in favour of a power
+ * state plus a battery percentage, so the buckets this enum used to expose
+ * (empty/low/medium/full) are gone. Use
+ * {@link ControllerIndex#getBatteryPercentage()} for the charge level.
  *
  * @author Benjamin Schulte
  */
 public enum ControllerPowerLevel {
     /**
-     * Power level unknown
+     * The power state could not be determined
      */
-    POWER_UNKNOWN,
+    POWER_ERROR(-1),
     /**
-     * Power level 0-5%
+     * Power state unknown
      */
-    POWER_EMPTY,   /* <= 5% */
+    POWER_UNKNOWN(0),
     /**
-     * Power level 6-20%
+     * Running on battery and not plugged in
      */
-    POWER_LOW,     /* <= 20% */
+    POWER_ON_BATTERY(1),
     /**
-     * Power level 21-70%
+     * Plugged in, no battery available
      */
-    POWER_MEDIUM,  /* <= 70% */
+    POWER_NO_BATTERY(2),
     /**
-     * Power level 71-100%
+     * Plugged in and charging
      */
-    POWER_FULL,    /* <= 100% */
+    POWER_CHARGING(3),
     /**
-     * Controller is wired
+     * Plugged in and fully charged
      */
-    POWER_WIRED,
-    POWER_MAX;
+    POWER_CHARGED(4);
 
-    public static ControllerPowerLevel valueOf(int n) {
-        // C enum starts with -1, so we need to increment by one
-        return ControllerPowerLevel.values()[n + 1];
+    private final int sdlValue;
+
+    ControllerPowerLevel(int sdlValue) {
+        this.sdlValue = sdlValue;
     }
 
+    /**
+     * @return the SDL_PowerState value this constant corresponds to
+     */
+    public int getSdlValue() {
+        return sdlValue;
+    }
+
+    /**
+     * @param sdlValue an SDL_PowerState value
+     * @return the matching constant, or {@link #POWER_UNKNOWN} for values this
+     * version of Jamepad does not know about
+     */
+    public static ControllerPowerLevel fromSdlValue(int sdlValue) {
+        for (ControllerPowerLevel level : values()) {
+            if (level.sdlValue == sdlValue) {
+                return level;
+            }
+        }
+        return POWER_UNKNOWN;
+    }
 }

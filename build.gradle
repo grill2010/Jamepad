@@ -1,172 +1,399 @@
-buildscript {
-    repositories {
-        mavenLocal()
-        mavenCentral()
-        maven { url "https://oss.sonatype.org/content/repositories/snapshots/" }
-    }
-    dependencies {
-        classpath "com.badlogicgames.gdx:gdx-jnigen-gradle:2.2.0"
-    }
+import javax.inject.Inject
+import org.gradle.process.ExecOperations
+
+plugins {
+    id "java-library"
+    id "maven-publish"
+    id "signing"
+    id "eclipse"
+    id "idea"
+    id "com.badlogicgames.jnigen.jnigen-gradle" version "3.1.2"
 }
-
-apply plugin: "java-library"
-apply plugin: "maven-publish"
-apply plugin: "eclipse"
-apply plugin: "idea"
-
-sourceCompatibility = 1.7
-targetCompatibility = 1.7
 
 repositories {
     mavenLocal()
     mavenCentral()
-    maven { url "https://oss.sonatype.org/content/repositories/snapshots/" }
+    maven { url = "https://central.sonatype.com/repository/maven-snapshots/" }
 }
 
 ext {
-    gdxVersion = '1.9.11'
-
     isReleaseBuild = {
         return project.hasProperty("RELEASE")
     }
 
     getReleaseRepositoryUrl = {
-        return project.hasProperty('RELEASE_REPOSITORY_URL') ? RELEASE_REPOSITORY_URL
-                : "https://oss.sonatype.org/service/local/staging/deploy/maven2/"
+        return project.hasProperty("RELEASE_REPOSITORY_URL") ? RELEASE_REPOSITORY_URL
+                : "https://ossrh-staging-api.central.sonatype.com/service/local/staging/deploy/maven2/"
     }
 
     getSnapshotRepositoryUrl = {
-        return project.hasProperty('SNAPSHOT_REPOSITORY_URL') ? SNAPSHOT_REPOSITORY_URL
-                : "https://oss.sonatype.org/content/repositories/snapshots/"
+        return project.hasProperty("SNAPSHOT_REPOSITORY_URL") ? SNAPSHOT_REPOSITORY_URL
+                : "https://central.sonatype.com/repository/maven-snapshots/"
     }
 
     getRepositoryUsername = {
-        return project.hasProperty('NEXUS_USERNAME') ? NEXUS_USERNAME : "$System.env.NEXUS_USERNAME"
+        return project.hasProperty("NEXUS_USERNAME") ? NEXUS_USERNAME : "$System.env.NEXUS_USERNAME"
     }
 
     getRepositoryPassword = {
-        return project.hasProperty('NEXUS_PASSWORD') ? NEXUS_PASSWORD : "$System.env.NEXUS_PASSWORD"
+        return project.hasProperty("NEXUS_PASSWORD") ? NEXUS_PASSWORD : "$System.env.NEXUS_PASSWORD"
     }
 }
+
+version = project.getProperty("version") + (isReleaseBuild() ? "" : "-SNAPSHOT")
 
 java {
-    withJavadocJar()
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
     withSourcesJar()
+    withJavadocJar()
 }
 
-version project.getProperty('version') + (isReleaseBuild() ? "" : "-SNAPSHOT")
+tasks.withType(JavaCompile).configureEach {
+    options.release = 25
+    options.encoding = "UTF-8"
+}
+
+tasks.withType(Javadoc).configureEach {
+    options.encoding = "UTF-8"
+    options.addStringOption("Xdoclint:none", "-quiet")
+}
 
 dependencies {
-    api "com.badlogicgames.gdx:gdx-jnigen-loader:2.2.0"
-
-    testImplementation "com.badlogicgames.gdx:gdx:$gdxVersion"
-    testImplementation "com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-desktop"
+    api "com.badlogicgames.jnigen:jnigen-loader:3.1.2"
 }
 
-apply plugin: "com.badlogicgames.gdx.gdx-jnigen"
+// ---------------------------------------------------------------------------
+// SDL 3
+// ---------------------------------------------------------------------------
+//
+// Each jnigen build target gets its own statically linked SDL 3, configured and
+// installed by CMake into build/sdl/<targetFolder>. The target folder names below
+// are exactly jnigen's BuildTarget.getTargetFolder() values, so the two stay in sync.
 
-ext.getSdl2CFlags = { workingDir ->
-    try {
-        String executable = 'sdl2-config2';
-        if(workingDir != null) {
-            executable = workingDir + executable;
-            if(!file(executable).exists()) {
-                return "";
-            }
+def sdlSrcDir = layout.projectDirectory.dir("SDL")
+def sdlStageRoot = layout.buildDirectory.dir("sdl")
+def sdlScratchRoot = layout.buildDirectory.dir("sdl-cmake")
+
+def sdlCommonCMakeArgs = [
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+        "-DCMAKE_INSTALL_LIBDIR=lib",
+        "-DSDL_SHARED=OFF",
+        "-DSDL_STATIC=ON",
+        "-DSDL_TEST_LIBRARY=OFF",
+        "-DSDL_TESTS=OFF",
+        "-DSDL_EXAMPLES=OFF",
+        "-DSDL_INSTALL_DOCS=OFF",
+        // Jamepad only ever touches gamepads, sensors and the DualSense haptics
+        // audio device, so everything built around a window stays out of the binary.
+        "-DSDL_VIDEO=OFF",
+        "-DSDL_DIALOG=OFF",
+        "-DSDL_TRAY=OFF",
+        "-DSDL_AUDIO=ON",
+        "-DSDL_JOYSTICK=ON",
+        "-DSDL_HAPTIC=ON",
+        "-DSDL_HIDAPI=ON",
+        "-DSDL_POWER=ON",
+        "-DSDL_SENSOR=ON",
+]
+
+// SDL_UNIX_CONSOLE_BUILD: SDL_VIDEO=OFF means CMake finds neither X11 nor Wayland,
+// which it treats as a configuration mistake unless this is set.
+//
+// D-Bus and IBus are only of interest to a windowed app, and turning them off keeps
+// the 32-bit and ARM builds away from dbus-arch-deps.h, the one header among SDL's
+// Linux dependencies that differs per architecture. Everything else SDL detects here
+// (ALSA, PulseAudio, PipeWire, sndio, udev) is dlopened rather than linked, so the
+// host's headers are all the cross builds need.
+def sdlLinuxCMakeArgs = sdlCommonCMakeArgs + [
+        "-DSDL_UNIX_CONSOLE_BUILD=ON",
+        "-DSDL_DBUS=OFF",
+        "-DSDL_IBUS=OFF",
+]
+
+// SDL 3 requires macOS 10.13 or newer; jnigen still defaults its Mac targets to 10.7.
+def macDeploymentTarget = "10.13"
+
+abstract class SdlCMakeBuild extends DefaultTask {
+
+    @Internal
+    abstract DirectoryProperty getSdlSourceDir()
+
+    @Internal
+    abstract DirectoryProperty getScratchDir()
+
+    @Internal
+    abstract DirectoryProperty getStageDir()
+
+    @Input
+    abstract ListProperty<String> getCmakeArgs()
+
+    @Inject
+    abstract ExecOperations getExecOperations()
+
+    SdlCMakeBuild() {
+        group = "sdl"
+        // CMake does its own incremental work; re-running the three steps on an
+        // already-configured tree costs a second or two.
+        outputs.upToDateWhen { false }
+    }
+
+    @TaskAction
+    void buildSdl() {
+        File source = sdlSourceDir.get().asFile
+        if (!new File(source, "CMakeLists.txt").exists()) {
+            throw new GradleException("No SDL sources in ${source}. Run: git submodule update --init --recursive")
         }
 
-        def output = new ByteArrayOutputStream()
-        project.exec {
-            commandLine executable, '--cflags'
-            standardOutput = output
-            ignoreExitValue true
-        }
-        return output.toString().trim();
-    } catch(Exception e) {
-        return "";
+        File scratch = scratchDir.get().asFile
+        File stage = stageDir.get().asFile
+        scratch.mkdirs()
+
+        String cmake = System.getenv("CMAKE") ?: "cmake"
+
+        List<String> configure = [cmake, "-S", source.absolutePath, "-B", scratch.absolutePath]
+        configure.addAll(cmakeArgs.get())
+        configure.add("-DCMAKE_INSTALL_PREFIX=" + stage.absolutePath)
+
+        execOperations.exec { it.commandLine(configure) }
+        execOperations.exec { it.commandLine(cmake, "--build", scratch.absolutePath, "--config", "Release", "--parallel") }
+        execOperations.exec { it.commandLine(cmake, "--install", scratch.absolutePath, "--config", "Release") }
     }
 }
-ext.getSdl2StaticLibs = { workingDir ->
-    try {
-        String executable = 'sdl2-config';
-        if(workingDir != null) {
-            executable = workingDir + executable;
-            if(!file(executable).exists()) {
-                return "";
-            }
-        }
 
-        def output = new ByteArrayOutputStream()
-        project.exec {
-            commandLine executable, '--static-libs'
-            standardOutput = output
-            ignoreExitValue true
+// SDL refuses to let SDL_DYNAMIC_API be forced off from the command line, so the
+// header has to be edited. Leaving it on would let an SDL_DYNAMIC_API environment
+// variable redirect the SDL we statically linked into libjamepad to some other build.
+def sdlDynapiHeader = layout.projectDirectory.file("SDL/src/dynapi/SDL_dynapi.h")
+
+def patchSdlDynamicApi = tasks.register("patchSdlDynamicApi") {
+    group = "sdl"
+    description = "Disables SDL_DYNAMIC_API in the SDL submodule"
+
+    def header = sdlDynapiHeader.asFile
+    outputs.upToDateWhen { header.exists() && !header.text.contains("#define SDL_DYNAMIC_API 1") }
+
+    doLast {
+        if (!header.exists()) {
+            throw new GradleException("No SDL sources. Run: git submodule update --init --recursive")
         }
-        return output.toString().trim();
-    } catch(Exception e) {
-        return "";
+        def patched = header.text.replace("#define SDL_DYNAMIC_API 1", "#define SDL_DYNAMIC_API 0")
+        if (patched != header.text) {
+            header.text = patched
+            logger.lifecycle("Disabled SDL_DYNAMIC_API in ${header}")
+        }
+    }
+}
+
+def registerSdlBuild = { String targetFolder, List<String> extraArgs ->
+    tasks.register("buildSdl" + targetFolder.capitalize(), SdlCMakeBuild) { task ->
+        task.description = "Builds and stages a static SDL 3 for the ${targetFolder} target"
+        task.dependsOn patchSdlDynamicApi
+        task.sdlSourceDir.set(sdlSrcDir)
+        task.scratchDir.set(sdlScratchRoot.map { it.dir(targetFolder) })
+        task.stageDir.set(sdlStageRoot.map { it.dir(targetFolder) })
+        task.cmakeArgs.set(extraArgs)
+    }
+}
+
+def mingwToolchain = { String triple ->
+    "-DCMAKE_TOOLCHAIN_FILE=" + sdlSrcDir.file("build-scripts/cmake-toolchain-mingw64-${triple}.cmake").asFile.absolutePath
+}
+
+def localToolchain = { String name ->
+    "-DCMAKE_TOOLCHAIN_FILE=" + layout.projectDirectory.file("sdl_build/${name}.cmake").asFile.absolutePath
+}
+
+// Windows is built with MinGW by default. -PwindowsAbi=msvc switches the single
+// Windows target over to cl.exe/link.exe, which is what you want for a local
+// smoke test on a Windows box without a MinGW cross toolchain.
+def useMsvc = project.findProperty("windowsAbi") == "msvc"
+
+if (useMsvc) {
+    // jnigen links MSVC targets with /MT, so SDL has to use the static CRT too.
+    def msvcArgs = ["-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"]
+    // Only the Visual Studio generator understands -A; anything else (Ninja from a
+    // developer command prompt) picks the architecture up from the environment.
+    if (!System.getenv("CMAKE_GENERATOR")) {
+        msvcArgs += ["-A", "x64"]
+    }
+    registerSdlBuild("windows64", sdlCommonCMakeArgs + msvcArgs)
+} else {
+    registerSdlBuild("windows32", sdlCommonCMakeArgs + [mingwToolchain("i686")])
+    registerSdlBuild("windows64", sdlCommonCMakeArgs + [mingwToolchain("x86_64")])
+}
+
+registerSdlBuild("linux32", sdlLinuxCMakeArgs + [localToolchain("toolchain_linux_x86_32")])
+registerSdlBuild("linux64", sdlLinuxCMakeArgs)
+registerSdlBuild("linuxarm32", sdlLinuxCMakeArgs + [localToolchain("toolchain_linux_arm32")])
+registerSdlBuild("linuxarm64", sdlLinuxCMakeArgs + [localToolchain("toolchain_linux_arm64")])
+
+registerSdlBuild("macosx64", sdlCommonCMakeArgs +
+        ["-DCMAKE_OSX_ARCHITECTURES=x86_64", "-DCMAKE_OSX_DEPLOYMENT_TARGET=${macDeploymentTarget}".toString()])
+registerSdlBuild("macosxarm64", sdlCommonCMakeArgs +
+        ["-DCMAKE_OSX_ARCHITECTURES=arm64", "-DCMAKE_OSX_DEPLOYMENT_TARGET=${macDeploymentTarget}".toString()])
+
+/**
+ * Reads the static link line out of the sdl3.pc that CMake installed for a target.
+ *
+ * A static-only SDL 3 puts everything on the pkg-config "Libs:" line, so no
+ * pkg-config binary is needed and cross builds resolve exactly the same way as
+ * native ones. -lSDL3 is rewritten to the absolute path of the archive so a system
+ * wide libSDL3.so can never win the link.
+ */
+def readSdlLinkLine = { File stage, boolean msvc ->
+    File pc = new File(stage, "lib/pkgconfig/sdl3.pc")
+    if (!pc.exists()) {
+        throw new GradleException("No ${pc}. Build SDL for this target first.")
+    }
+
+    // pkg-config resolves ${pcfiledir} itself; SDL uses it to make the prefix relocatable.
+    def vars = ["pcfiledir": pc.parentFile.absolutePath.replace("\\", "/")]
+    def libTokens = []
+    pc.eachLine { rawLine ->
+        def line = rawLine.trim()
+        if (line.startsWith("Libs:") || line.startsWith("Libs.private:")) {
+            libTokens.addAll(line.substring(line.indexOf(":") + 1).trim().split("\\s+").findAll { it })
+        } else if (line ==~ /^[A-Za-z_][A-Za-z0-9_]*=.*/) {
+            def idx = line.indexOf("=")
+            vars[line.substring(0, idx)] = line.substring(idx + 1)
+        }
+    }
+
+    def expand = { String value ->
+        def out = value
+        // pkg-config variables reference each other (exec_prefix -> prefix -> ...),
+        // so keep substituting until the string stops changing.
+        for (int i = 0; i < 10 && out.contains('${'); i++) {
+            vars.each { k, v -> out = out.replace('${' + k + '}', v) }
+        }
+        return out
+    }
+
+    String archiveName = msvc ? "SDL3-static.lib" : "libSDL3.a"
+    File archive = new File(stage, "lib/" + archiveName)
+    if (!archive.exists()) {
+        throw new GradleException("No ${archive}. Build SDL for this target first.")
+    }
+
+    def result = []
+    libTokens.collect { expand(it) }.each { token ->
+        if (token == "-lSDL3" || token == "-lSDL3-static") {
+            result.add(archive.absolutePath)
+        } else if (token.startsWith("-L")) {
+            // The only -L pkg-config emits points at our own staging prefix, and we
+            // already link the archive by absolute path.
+        } else if (msvc && token.startsWith("-l")) {
+            result.add(token.substring(2) + ".lib")
+        } else {
+            result.add(token)
+        }
+    }
+    return result
+}
+
+// ---------------------------------------------------------------------------
+// jnigen
+// ---------------------------------------------------------------------------
+
+def hostTargetFolder = {
+    String osName = System.getProperty("os.name").toLowerCase()
+    String arch = System.getProperty("os.arch").toLowerCase()
+    boolean arm = arch.startsWith("arm") || arch.contains("aarch64")
+    boolean is64 = arch.contains("64")
+
+    if (osName.contains("win")) {
+        return is64 ? "windows64" : "windows32"
+    }
+    if (osName.contains("mac") || osName.contains("darwin")) {
+        return arm ? "macosxarm64" : "macosx64"
+    }
+    if (arm) {
+        return is64 ? "linuxarm64" : "linuxarm32"
+    }
+    return is64 ? "linux64" : "linux32"
+}()
+
+def configureTarget = { target ->
+    String folder = target.targetFolder
+    boolean msvc = target.compilerABIType.toString() == "MSVC"
+
+    target.headerDirs = (target.headerDirs as List) + ["build/sdl/${folder}/include".toString()] as String[]
+
+    // SDL 3 tags its public API with a visibility("default")/dllexport attribute.
+    // Blanking it keeps a statically linked SDL from being re-exported out of
+    // libjamepad, where it would collide with any other SDL in the process.
+    def visibilityFlag = msvc ? "/DSDL_DECLSPEC=" : "-DSDL_DECLSPEC="
+    target.cFlags = (target.cFlags as List) + [visibilityFlag] as String[]
+    target.cppFlags = (target.cppFlags as List) + [visibilityFlag] as String[]
+
+    if (target.os.toString() == "MacOsX") {
+        def retarget = { List<String> flags ->
+            flags.collect { it == "-mmacosx-version-min=10.7" ? "-mmacosx-version-min=${macDeploymentTarget}".toString() : it }
+        }
+        target.cFlags = retarget(target.cFlags as List) as String[]
+        target.cppFlags = retarget(target.cppFlags as List) as String[]
+        target.linkerFlags = retarget(target.linkerFlags as List) as String[]
+    }
+
+    def buildTaskNames = [
+            "jnigenBuild${target.os.name()}_${target.architecture.displayName}${target.bitness.name()}".toString(),
+            "jnigenBuildAll${target.os.name()}".toString(),
+    ]
+    if (folder == hostTargetFolder) {
+        buildTaskNames.add("jnigenBuildHost")
+    }
+
+    String sdlTaskName = "buildSdl" + folder.capitalize()
+    def stage = sdlStageRoot.get().dir(folder).asFile
+    def linkLineReader = readSdlLinkLine
+
+    // The SDL link line can only be read once SDL has actually been installed, so it
+    // is resolved when the build task runs rather than during configuration.
+    // matching() is a live view, so this holds regardless of whether the plugin has
+    // registered the aggregate tasks by the time this runs.
+    tasks.matching { buildTaskNames.contains(it.name) }.configureEach {
+        dependsOn sdlTaskName
+        doFirst {
+            target.libraries = linkLineReader(stage, msvc) as String[]
+        }
     }
 }
 
 jnigen {
     sharedLibName = "jamepad"
+
     all {
-        headerDirs = ["../SDL/include"]
-        cFlags += " -fvisibility=hidden "
-        cppFlags += " -std=c++11 -fvisibility=hidden "
-        linkerFlags += " -fvisibility=hidden -fdata-sections -ffunction-sections "
+        configureTarget(it)
     }
-    add(Windows, x32) {
-        cFlags += getSdl2CFlags('./SDL/build-windows32/')
-        cppFlags += getSdl2CFlags('./SDL/build-windows32/')
-        libraries += getSdl2StaticLibs('./SDL/build-windows32/').replaceAll("[a-zA-Z0-9_\\.\\-/]+libSDL2.a", file("SDL/build-windows32/build/.libs/libSDL2.a").absolutePath).replace("-lSDL2main", file("SDL/build-windows32/build/.libs/libSDL2main.a").absolutePath)
+
+    if (useMsvc) {
+        addWindows(x64, x86, MSVC)
+    } else {
+        addWindows(x32, x86)
+        addWindows(x64, x86)
     }
-    add(Windows, x64) {
-        cFlags += getSdl2CFlags('./SDL/build-windows64/')
-        cppFlags += getSdl2CFlags('./SDL/build-windows64/')
-        libraries += getSdl2StaticLibs('./SDL/build-windows64/').replaceAll("[a-zA-Z0-9_\\.\\-/]+libSDL2.a", file("SDL/build-windows64/build/.libs/libSDL2.a").absolutePath).replace("-lSDL2main", file("SDL/build-windows64/build/.libs/libSDL2main.a").absolutePath)
-    }
-    add(Linux, x32) {
-        cFlags += getSdl2CFlags('./SDL/build-linux32/')
-        cppFlags += getSdl2CFlags('./SDL/build-linux32/')
-        libraries += getSdl2StaticLibs('./SDL/build-linux32/').replaceAll("[a-zA-Z0-9_\\.\\-/]+libSDL2.a", file("SDL/build-linux32/build/.libs/libSDL2.a").absolutePath)
-    }
-    add(Linux, x64) {
-        cFlags += getSdl2CFlags('./SDL/build-linux64/')
-        cppFlags += getSdl2CFlags('./SDL/build-linux64/')
-        libraries += getSdl2StaticLibs('./SDL/build-linux64/').replaceAll("[a-zA-Z0-9_\\.\\-/]+libSDL2.a", file("SDL/build-linux64/build/.libs/libSDL2.a").absolutePath)
-    }
-    add(Linux, x32, ARM) {
-        cFlags += getSdl2CFlags('./SDL/build-linuxarm32/')
-        cppFlags += getSdl2CFlags('./SDL/build-linuxarm32/')
-        libraries += getSdl2StaticLibs('./SDL/build-linuxarm32/').replaceAll("[a-zA-Z0-9_\\.\\-/]+libSDL2.a", file("SDL/build-linuxarm32/build/.libs/libSDL2.a").absolutePath)
-    }
-    add(Linux, x64, ARM) {
-        cFlags += getSdl2CFlags('./SDL/build-linuxarm64/')
-        cppFlags += getSdl2CFlags('./SDL/build-linuxarm64/')
-        libraries += getSdl2StaticLibs('./SDL/build-linuxarm64/').replaceAll("[a-zA-Z0-9_\\.\\-/]+libSDL2.a", file("SDL/build-linuxarm64/build/.libs/libSDL2.a").absolutePath)
-    }
-    add(MacOsX, x64) {
-        cFlags += getSdl2CFlags('./SDL/build-macos64/')
-        cppFlags += getSdl2CFlags('./SDL/build-macos64/')
-        libraries += file("SDL/build-macos64/build/.libs/libSDL2.a").absolutePath + " -lm -liconv -Wl,-framework,CoreAudio -Wl,-framework,AudioToolbox -Wl,-framework,ForceFeedback -lobjc -Wl,-framework,CoreVideo -Wl,-framework,Cocoa -Wl,-framework,Carbon -Wl,-framework,IOKit -Wl,-weak_framework,QuartzCore -Wl,-weak_framework,Metal"
-    }
-    add(MacOsX, x64, ARM) {
-        cFlags += getSdl2CFlags('./SDL/build-macosarm64/')
-        cppFlags += getSdl2CFlags('./SDL/build-macosarm64/')
-        libraries += file("SDL/build-macosarm64/build/.libs/libSDL2.a").absolutePath + " -lm -liconv -Wl,-framework,CoreAudio -Wl,-framework,AudioToolbox -Wl,-framework,ForceFeedback -lobjc -Wl,-framework,CoreVideo -Wl,-framework,Cocoa -Wl,-framework,Carbon -Wl,-framework,IOKit -Wl,-weak_framework,QuartzCore -Wl,-weak_framework,Metal"
-    }
+
+    addLinux(x32, x86)
+    addLinux(x64, x86)
+    addLinux(x32, ARM)
+    addLinux(x64, ARM)
+
+    addMac(x64, x86)
+    addMac(x64, ARM)
 }
 
+// Keep shipping a single fat jamepad.jar with whatever natives are present, the way
+// this fork always has. jnigen additionally publishes a jamepad-platform artifact.
 jar {
     archiveBaseName = "jamepad"
-    from fileTree("libs").files
+    from(layout.buildDirectory.dir("jnigen/libs")) {
+        include "**/*.dll", "**/*.so", "**/*.dylib"
+        eachFile { it.path = it.name }
+        includeEmptyDirs = false
+    }
 }
 
-dependencies {
-    testImplementation "com.badlogicgames.gdx:gdx:$gdxVersion"
-    testImplementation "com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-desktop"
-}
-
-
-apply from: 'publish.gradle'
+apply from: "publish.gradle"

@@ -2,38 +2,70 @@ package com.studiohartman.jamepad;
 
 /**
  * This is an enumerated type for controller buttons.
- *
- * Things are a bit gross here because it needs to correspond with the
- * enum SDL_GameControllerButton in SDL_gamecontroller.h.
- *
- * We skip the invalid button one and the max one (Who would ever want to check those anyway?).
- * This means that we start with an index 0 instead of -1, so that's nice at least.
- *
- * Make sure that the indices of the included buttons matches with the values in the
- * enum in native code. (i.e. that A is 0 in both, B is 1 in both, etc.).
+ * <p>
+ * Each constant carries the SDL_GamepadButton value it maps to, so the Java
+ * declaration order is free to differ from SDL's.
+ * <p>
+ * SDL 3 renamed the four face buttons to positional names. The historical
+ * {@code A}/{@code B}/{@code X}/{@code Y} names are kept here because they are
+ * what callers already use; they mean SOUTH/EAST/WEST/NORTH respectively, which
+ * is the physical position on an Xbox-style pad.
  *
  * @author William Hartman
  */
 public enum ControllerButton {
-    A,
-    B,
-    X,
-    Y,
-    BACK,
-    GUIDE,
-    START,
-    LEFTSTICK,
-    RIGHTSTICK,
-    LEFTBUMPER,
-    RIGHTBUMPER,
-    DPAD_UP,
-    DPAD_DOWN,
-    DPAD_LEFT,
-    DPAD_RIGHT,
-    BUTTON_MISC1,    /* Xbox Series X share button, PS5 microphone button, Nintendo Switch Pro capture button */
-    BUTTON_PADDLE1,  /* Xbox Elite paddle P1 */
-    BUTTON_PADDLE2,  /* Xbox Elite paddle P3 */
-    BUTTON_PADDLE3,  /* Xbox Elite paddle P2 */
-    BUTTON_PADDLE4,  /* Xbox Elite paddle P4 */
-    BUTTON_TOUCHPAD, /* PS4/PS5 touchpad button */
+    /** SDL_GAMEPAD_BUTTON_SOUTH */
+    A(0),
+    /** SDL_GAMEPAD_BUTTON_EAST */
+    B(1),
+    /** SDL_GAMEPAD_BUTTON_WEST */
+    X(2),
+    /** SDL_GAMEPAD_BUTTON_NORTH */
+    Y(3),
+    BACK(4),
+    GUIDE(5),
+    START(6),
+    LEFTSTICK(7),
+    RIGHTSTICK(8),
+    LEFTBUMPER(9),
+    RIGHTBUMPER(10),
+    DPAD_UP(11),
+    DPAD_DOWN(12),
+    DPAD_LEFT(13),
+    DPAD_RIGHT(14),
+    /** Xbox Series X share button, PS5 microphone button, Nintendo Switch Pro capture button */
+    BUTTON_MISC1(15),
+    /** Xbox Elite paddle P1 (upper right) */
+    BUTTON_PADDLE1(16),
+    /** Xbox Elite paddle P3 (upper left) */
+    BUTTON_PADDLE2(17),
+    /** Xbox Elite paddle P2 (lower right) */
+    BUTTON_PADDLE3(18),
+    /** Xbox Elite paddle P4 (lower left) */
+    BUTTON_PADDLE4(19),
+    /** PS4/PS5 touchpad button */
+    BUTTON_TOUCHPAD(20),
+    /** Additional button, controller specific */
+    BUTTON_MISC2(21),
+    /** Additional button, controller specific */
+    BUTTON_MISC3(22),
+    /** Additional button, controller specific */
+    BUTTON_MISC4(23),
+    /** Additional button, controller specific */
+    BUTTON_MISC5(24),
+    /** Additional button, controller specific */
+    BUTTON_MISC6(25);
+
+    private final int sdlValue;
+
+    ControllerButton(int sdlValue) {
+        this.sdlValue = sdlValue;
+    }
+
+    /**
+     * @return the SDL_GamepadButton value this constant corresponds to
+     */
+    public int getSdlValue() {
+        return sdlValue;
+    }
 }

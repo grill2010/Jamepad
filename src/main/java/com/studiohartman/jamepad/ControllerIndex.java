@@ -1,7 +1,5 @@
 package com.studiohartman.jamepad;
 
-import com.badlogic.gdx.utils.SharedLibraryLoader;
-
 import java.util.*;
 
 /**
@@ -18,7 +16,105 @@ import java.util.*;
  */
 public final class ControllerIndex {
     /*JNI
-    #include "SDL.h"
+    #include <SDL3/SDL.h>
+    #include <stdio.h>
+    #include <string.h>
+
+    // Gamepad handles cross the JNI boundary as jlong, so go through intptr_t to keep
+    // 32-bit targets free of precision-loss errors.
+    static SDL_Gamepad *jamepad_pad(jlong controllerPtr) {
+        return (SDL_Gamepad *)(intptr_t) controllerPtr;
+    }
+
+    static SDL_Joystick *jamepad_joystick(jlong controllerPtr) {
+        return SDL_GetGamepadJoystick(jamepad_pad(controllerPtr));
+    }
+
+    // SDL reports the hardware sample time on sensor events only; SDL_GetGamepadSensorData
+    // hands back values without one. Keep the newest timestamp per device so the polling
+    // API can still report when a sample was actually taken.
+    #define JAMEPAD_MAX_SENSOR_DEVICES 16
+
+    typedef struct {
+        SDL_JoystickID id;
+        Uint64 accelTimestamp;
+        Uint64 gyroTimestamp;
+    } JamepadSensorClock;
+
+    static JamepadSensorClock jamepad_sensor_clocks[JAMEPAD_MAX_SENSOR_DEVICES];
+
+    static JamepadSensorClock *jamepad_sensor_clock(SDL_JoystickID id, bool create) {
+        JamepadSensorClock *slot = NULL;
+
+        for (int i = 0; i < JAMEPAD_MAX_SENSOR_DEVICES; i++) {
+            if (jamepad_sensor_clocks[i].id == id) {
+                return &jamepad_sensor_clocks[i];
+            }
+            if (slot == NULL && jamepad_sensor_clocks[i].id == 0) {
+                slot = &jamepad_sensor_clocks[i];
+            }
+        }
+
+        if (!create || slot == NULL) {
+            return NULL;
+        }
+
+        slot->id = id;
+        slot->accelTimestamp = 0;
+        slot->gyroTimestamp = 0;
+        return slot;
+    }
+
+    // Records every pending sensor event regardless of which device it belongs to, so it
+    // does not matter which controller happens to be polled first.
+    static void jamepad_take_sensor_events() {
+        SDL_Event events[32];
+        int count;
+
+        while ((count = SDL_PeepEvents(events, 32, SDL_GETEVENT,
+                                       SDL_EVENT_GAMEPAD_SENSOR_UPDATE,
+                                       SDL_EVENT_GAMEPAD_SENSOR_UPDATE)) > 0) {
+            for (int i = 0; i < count; i++) {
+                const SDL_GamepadSensorEvent *event = &events[i].gsensor;
+                JamepadSensorClock *clock = jamepad_sensor_clock(event->which, true);
+                if (clock == NULL) {
+                    continue;
+                }
+
+                if (event->sensor == SDL_SENSOR_ACCEL) {
+                    clock->accelTimestamp = event->sensor_timestamp;
+                } else if (event->sensor == SDL_SENSOR_GYRO) {
+                    clock->gyroTimestamp = event->sensor_timestamp;
+                }
+            }
+        }
+    }
+
+    static void jamepad_read_sensor_state(JNIEnv *env, SDL_Gamepad *pad, jobject sensorState) {
+        float accel[3] = { 0.0f, 0.0f, 0.0f };
+        float gyro[3] = { 0.0f, 0.0f, 0.0f };
+
+        SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, accel, 3);
+        SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, gyro, 3);
+
+        jamepad_take_sensor_events();
+
+        Uint64 accelTimestamp = 0;
+        Uint64 gyroTimestamp = 0;
+        JamepadSensorClock *clock =
+            jamepad_sensor_clock(SDL_GetJoystickID(SDL_GetGamepadJoystick(pad)), false);
+        if (clock != NULL) {
+            accelTimestamp = clock->accelTimestamp;
+            gyroTimestamp = clock->gyroTimestamp;
+        }
+
+        jclass clazz = env->GetObjectClass(sensorState);
+        jmethodID update_method = env->GetMethodID(clazz, "update", "(FFFFFFJJ)V");
+        env->CallVoidMethod(sensorState, update_method,
+                            accel[0], accel[1], accel[2],
+                            gyro[0], gyro[1], gyro[2],
+                            (jlong) accelTimestamp, (jlong) gyroTimestamp);
+    }
     */
 
     private static final boolean IS_WINDOWS = System.getProperty("os.name", "").toLowerCase().contains("win");
@@ -35,11 +131,17 @@ public final class ControllerIndex {
 
     private final Configuration.SonyControllerFeature sonyControllerFeature;
 
+    private final boolean motionSensorsRequested;
+
     private String controllerGuid = "";
 
     private boolean supportsTouchpad = false;
 
     private boolean supportsSensors = false;
+
+    private boolean hasAccelerometer = false;
+
+    private boolean hasGyroscope = false;
 
     private boolean supportsHaptic = false;
 
@@ -51,8 +153,6 @@ public final class ControllerIndex {
 
     private Timer hapticsTimer;
 
-    private volatile boolean closing = false;
-
     private static final String EMPTY_GUID = "00000000000000000000000000000000";
 
     /**
@@ -62,11 +162,15 @@ public final class ControllerIndex {
      *
      * @param index The index of the controller
      * @param sonyControllerFeature The indication for the controller if it should use Sony controller
-     *                                  features like motion data and touchpad
+     *                                  features like the touchpad and adaptive triggers
+     * @param motionSensorsRequested Whether to turn on the gyroscope and accelerometer if the
+     *                                  controller has them
      */
-    ControllerIndex(int index, Configuration.SonyControllerFeature sonyControllerFeature) {
+    ControllerIndex(int index, Configuration.SonyControllerFeature sonyControllerFeature,
+                    boolean motionSensorsRequested) {
         this.index = index;
         this.sonyControllerFeature = sonyControllerFeature;
+        this.motionSensorsRequested = motionSensorsRequested;
 
         heldDownButtons = new boolean[ControllerButton.values().length];
         justPressedButtons = new boolean[ControllerButton.values().length];
@@ -83,13 +187,20 @@ public final class ControllerIndex {
             controllerGuid = EMPTY_GUID;
             supportsTouchpad = false;
             supportsSensors = false;
+            hasAccelerometer = false;
+            hasGyroscope = false;
             supportsHaptic = false;
             return;
         }
         controllerGuid = nativeGetDeviceGuid(controllerPtr);
         if(!Objects.equals(Configuration.SonyControllerFeature.NONE, sonyControllerFeature)) {
             supportsTouchpad = nativeIsTouchpadSupported(controllerPtr);
-            supportsSensors = nativeEnableSensors(controllerPtr);
+        }
+        if(motionSensorsRequested) {
+            int enabledSensors = nativeEnableSensors(controllerPtr);
+            hasAccelerometer = (enabledSensors & SENSOR_ACCEL) != 0;
+            hasGyroscope = (enabledSensors & SENSOR_GYRO) != 0;
+            supportsSensors = enabledSensors != 0;
         }
         if(nativeIsDualSenseController(controllerPtr) &&
                 Objects.equals(Configuration.SonyControllerFeature.DUALSENSE_FEATURES_AND_HAPTICS, sonyControllerFeature)){
@@ -113,7 +224,7 @@ public final class ControllerIndex {
             hapticsTimer = null;
         }
 
-        if (closing) {
+        if (!isConnected()) {
             return;
         }
 
@@ -123,7 +234,7 @@ public final class ControllerIndex {
         localTimer.schedule(new TimerTask() {
             @Override public void run() {
                 try {
-                    if (closing || !isConnected()) {
+                    if (!isConnected()) {
                         return; // If not connected anymore skip connect haptics
                     }
 
@@ -164,7 +275,7 @@ public final class ControllerIndex {
     }
 
     private native void nativePoll(long controllerPtr); /*
-        SDL_GameControllerUpdate();
+        SDL_UpdateGamepads();
     */
 
     /**
@@ -175,50 +286,77 @@ public final class ControllerIndex {
     */
 
     private native long nativeConnectController(int index); /*
-        return (jlong) SDL_GameControllerOpen(index);
+        //SDL 3 opens gamepads by instance id, so map our slot onto the current device list.
+        int count = 0;
+        SDL_JoystickID *ids = SDL_GetGamepads(&count);
+        if (ids == NULL) {
+            return 0;
+        }
+
+        jlong result = 0;
+        if (index >= 0 && index < count) {
+            result = (jlong)(intptr_t) SDL_OpenGamepad(ids[index]);
+        }
+
+        SDL_free(ids);
+        return result;
     */
 
     private native boolean nativeIsTouchpadSupported(long controllerPtr); /*{
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        return SDL_GameControllerGetNumTouchpads(pad) > 0 ? JNI_TRUE : JNI_FALSE;
+        return SDL_GetNumGamepadTouchpads(jamepad_pad(controllerPtr)) > 0 ? JNI_TRUE : JNI_FALSE;
     }*/
 
-    private native boolean nativeEnableSensors(long controllerPtr); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        if(SDL_GameControllerHasSensor(pad, SDL_SENSOR_ACCEL) && SDL_GameControllerHasSensor(pad, SDL_SENSOR_GYRO)) {
-            SDL_GameControllerSetSensorEnabled(pad, SDL_SENSOR_ACCEL, SDL_TRUE);
-		    SDL_GameControllerSetSensorEnabled(pad, SDL_SENSOR_GYRO, SDL_TRUE);
+    private static final int SENSOR_ACCEL = 1;
 
-		    return JNI_TRUE;
+    private static final int SENSOR_GYRO = 2;
+
+    // A controller may expose only one of the two, so enable them independently and report
+    // back which ones actually came up.
+    private native int nativeEnableSensors(long controllerPtr); /*
+        SDL_Gamepad* pad = jamepad_pad(controllerPtr);
+        jint enabled = 0;
+
+        if (SDL_GamepadHasSensor(pad, SDL_SENSOR_ACCEL) &&
+            SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_ACCEL, true)) {
+            enabled |= 1;
         }
-        return JNI_FALSE;
+        if (SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO) &&
+            SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_GYRO, true)) {
+            enabled |= 2;
+        }
+
+        return enabled;
     */
 
     /*JNI
-    uint8_t *haptics_resampler_buf = NULL;
-     */
+    // The DualSense exposes its haptic motors as channels 3 and 4 of a 4-channel
+    // 48kHz playback device. Callers hand us 3kHz stereo, and SDL 3's audio stream
+    // does the resampling that SDL_AudioCVT used to do by hand.
+    static SDL_AudioDeviceID haptics_output = 0;
+    static SDL_AudioStream *haptics_stream = NULL;
+    static Uint8 *haptics_remix_buf = NULL;
+    static int haptics_remix_capacity = 0;
 
-    /*JNI
-    #include <stdio.h>
+    static void jamepad_close_haptics() {
+        if (haptics_stream != NULL) {
+            SDL_DestroyAudioStream(haptics_stream);
+            haptics_stream = NULL;
+        }
+        if (haptics_output != 0) {
+            SDL_CloseAudioDevice(haptics_output);
+            haptics_output = 0;
+        }
+        if (haptics_remix_buf != NULL) {
+            SDL_free(haptics_remix_buf);
+            haptics_remix_buf = NULL;
+            haptics_remix_capacity = 0;
+        }
+    }
     */
 
     private native boolean nativeEnableHaptics(); /*
-        SDL_AudioCVT cvt;
-	    int result = SDL_BuildAudioCVT(&cvt, AUDIO_S16LSB, 4, 3000, AUDIO_S16LSB, 4, 48000);
-	    if(result < 0) {
-	        return JNI_FALSE;
-	    }
-	    cvt.len = 240;  // 10 16bit stereo samples
-	    haptics_resampler_buf = (uint8_t*) SDL_calloc(cvt.len * cvt.len_mult, sizeof(uint8_t));
-	    return JNI_TRUE;
-    */
-
-    /*JNI
-    SDL_AudioDeviceID haptics_output = 0;
-     */
-
-    /*JNI
-    #include <string.h>
+        //Nothing to preallocate any more; just make sure the audio subsystem came up.
+        return SDL_WasInit(SDL_INIT_AUDIO) != 0 ? JNI_TRUE : JNI_FALSE;
     */
 
     private native boolean nativeConnectHaptics(boolean isWindowsOrMac, Object instance); /*
@@ -226,41 +364,74 @@ public final class ControllerIndex {
             return JNI_TRUE; // already initialized
         }
 
-        SDL_AudioSpec want, have;
-        SDL_zero(want);
-        want.freq = 48000;
-        want.format = AUDIO_S16LSB;
-        want.channels = 4;
-        want.samples = 480; // 10ms buffer
-        want.callback = NULL;
-
-        for (int i = 0; i < SDL_GetNumAudioDevices(0); i++) {
-            const char* device_name = SDL_GetAudioDeviceName(i, 0);
-            if (isWindowsOrMac) {
-                if (device_name == NULL || !strstr(device_name, "Wireless Controller")) {
-                    continue;
-                }
-            } else {
-                if (device_name == NULL || !strstr(device_name, "DualSense")) {
-                    continue;
-                }
-            }
-            haptics_output = SDL_OpenAudioDevice(device_name, 0, &want, &have, 0);
-            if (haptics_output == 0) {
-                continue;
-            }
-            SDL_PauseAudioDevice(haptics_output, 0);
-            return JNI_TRUE;
+        int count = 0;
+        SDL_AudioDeviceID *devices = SDL_GetAudioPlaybackDevices(&count);
+        if (devices == NULL) {
+            return JNI_FALSE;
         }
 
-        return JNI_FALSE;
+        const char* wanted = isWindowsOrMac ? "Wireless Controller" : "DualSense";
+
+        SDL_AudioSpec deviceSpec;
+        SDL_zero(deviceSpec);
+        deviceSpec.format = SDL_AUDIO_S16LE;
+        deviceSpec.channels = 4;
+        deviceSpec.freq = 48000;
+
+        SDL_AudioSpec sourceSpec;
+        SDL_zero(sourceSpec);
+        sourceSpec.format = SDL_AUDIO_S16LE;
+        sourceSpec.channels = 4;
+        sourceSpec.freq = 3000;
+
+        jboolean result = JNI_FALSE;
+
+        for (int i = 0; i < count; i++) {
+            const char* device_name = SDL_GetAudioDeviceName(devices[i]);
+            if (device_name == NULL || !strstr(device_name, wanted)) {
+                continue;
+            }
+
+            SDL_AudioDeviceID opened = SDL_OpenAudioDevice(devices[i], &deviceSpec);
+            if (opened == 0) {
+                continue;
+            }
+
+            //If the device did not really open with four channels, SDL will downmix and
+            //the two haptic channels disappear into the speaker mix.
+            SDL_AudioSpec actual;
+            SDL_zero(actual);
+            if (SDL_GetAudioDeviceFormat(opened, &actual, NULL) && actual.channels != 4) {
+                printf("NATIVE METHOD: DualSense haptics device \"%s\" opened with %d channels "
+                       "instead of 4, haptic channels will be lost\n", device_name, actual.channels);
+            }
+
+            SDL_AudioStream *stream = SDL_CreateAudioStream(&sourceSpec, &deviceSpec);
+            if (stream == NULL) {
+                SDL_CloseAudioDevice(opened);
+                continue;
+            }
+
+            if (!SDL_BindAudioStream(opened, stream)) {
+                SDL_DestroyAudioStream(stream);
+                SDL_CloseAudioDevice(opened);
+                continue;
+            }
+
+            haptics_output = opened;
+            haptics_stream = stream;
+            result = JNI_TRUE;
+            break;
+        }
+
+        SDL_free(devices);
+        return result;
     */
 
     /**
      * Close the connection to this controller.
      */
     public void close() {
-        this.closing = true;
         final Timer timer = hapticsTimer;
         if (timer != null) {
             try {
@@ -281,25 +452,12 @@ public final class ControllerIndex {
         touchStates.clear();
     }
 
-    /*JNI
-    #include <cstdlib>
-     */
-
     private native void nativeClose(long controllerPtr); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        if(pad && SDL_GameControllerGetAttached(pad)) {
-            SDL_GameControllerClose(pad);
+        SDL_Gamepad* pad = jamepad_pad(controllerPtr);
+        if(pad) {
+            SDL_CloseGamepad(pad);
         }
-        pad = NULL;
-        if(haptics_resampler_buf != NULL) {
-            free(haptics_resampler_buf);
-            haptics_resampler_buf = NULL;
-        }
-        if (haptics_output > 0)
-        {
-            SDL_CloseAudioDevice(haptics_output);
-		    haptics_output = 0;
-		}
+        jamepad_close_haptics();
     */
 
     boolean isUsingSonyControllerFeatures() {
@@ -314,9 +472,49 @@ public final class ControllerIndex {
         return supportsTouchpad;
     }
 
+    /**
+     * @return true if motion sensors were requested through
+     * {@link Configuration#useControllerMotionSensors} and this controller brought up at
+     * least one of them
+     */
     public boolean isSupportingSensorData() {
         return supportsSensors;
     }
+
+    /**
+     * @return true if accelerometer readings of {@link #getSensorState()} are live. When
+     * false those axes stay at zero.
+     */
+    public boolean isSupportingAccelerometer() {
+        return hasAccelerometer;
+    }
+
+    /**
+     * @return true if gyroscope readings of {@link #getSensorState()} are live. When false
+     * those axes stay at zero.
+     */
+    public boolean isSupportingGyroscope() {
+        return hasGyroscope;
+    }
+
+    /**
+     * The rate the controller reports motion samples at, in samples per second, or 0 if SDL
+     * cannot tell. Useful as a fallback when a driver does not supply sample timestamps.
+     *
+     * @throws ControllerUnpluggedException If the controller is not connected
+     */
+    public float getSensorDataRate() throws ControllerUnpluggedException {
+        ensureConnected();
+        if (!supportsSensors) {
+            return 0;
+        }
+        return nativeGetSensorDataRate(controllerPtr, hasGyroscope ? SENSOR_GYRO : SENSOR_ACCEL);
+    }
+
+    private native float nativeGetSensorDataRate(long controllerPtr, int sensor); /*
+        return SDL_GetGamepadSensorDataRate(jamepad_pad(controllerPtr),
+                                            sensor == 2 ? SDL_SENSOR_GYRO : SDL_SENSOR_ACCEL);
+    */
 
     public boolean isSupportingHaptics() { return supportsHaptic; }
 
@@ -354,8 +552,8 @@ public final class ControllerIndex {
         return controllerPtr != 0 && nativeIsConnected(controllerPtr);
     }
     private native boolean nativeIsConnected(long controllerPtr); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        if (pad && SDL_GameControllerGetAttached(pad)) {
+        SDL_Gamepad* pad = jamepad_pad(controllerPtr);
+        if (pad && SDL_GamepadConnected(pad)) {
             return JNI_TRUE;
         }
         return JNI_FALSE;
@@ -379,13 +577,15 @@ public final class ControllerIndex {
     }
 
     private native boolean nativeCanVibrate(long controllerPtr); /*
-        SDL_Joystick* joystick = SDL_GameControllerGetJoystick((SDL_GameController*) controllerPtr);
-        return SDL_JoystickHasRumble(joystick);
+        //SDL_JoystickHasRumble is gone in SDL 3; the capability is a gamepad property now.
+        SDL_PropertiesID props = SDL_GetGamepadProperties(jamepad_pad(controllerPtr));
+        return SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false) ? JNI_TRUE : JNI_FALSE;
     */
 
     private native boolean nativeDoVibration(long controllerPtr, int leftMagnitude, int rightMagnitude, int duration_ms); /*
-        SDL_Joystick* joystick = SDL_GameControllerGetJoystick((SDL_GameController*) controllerPtr);
-        return SDL_JoystickRumble(joystick, leftMagnitude, rightMagnitude,  duration_ms) == 0;
+        return SDL_RumbleGamepad(jamepad_pad(controllerPtr),
+                                 (Uint16) leftMagnitude, (Uint16) rightMagnitude,
+                                 (Uint32) duration_ms) ? JNI_TRUE : JNI_FALSE;
     */
 
     /**
@@ -422,7 +622,7 @@ public final class ControllerIndex {
      * @throws ControllerUnpluggedException If the controller is not connected
      */
     public boolean isButtonPressed(ControllerButton toCheck) throws ControllerUnpluggedException {
-        updateButton(toCheck.ordinal());
+        updateButton(toCheck);
         return heldDownButtons[toCheck.ordinal()];
     }
 
@@ -437,22 +637,22 @@ public final class ControllerIndex {
      * @throws ControllerUnpluggedException If the controller is not connected
      */
     public boolean isButtonJustPressed(ControllerButton toCheck) throws ControllerUnpluggedException {
-        updateButton(toCheck.ordinal());
+        updateButton(toCheck);
         return justPressedButtons[toCheck.ordinal()];
     }
 
-    private void updateButton(int buttonIndex) throws ControllerUnpluggedException {
+    private void updateButton(ControllerButton button) throws ControllerUnpluggedException {
         ensureConnected();
 
-        boolean currButtonIsPressed = nativeCheckButton(controllerPtr, buttonIndex);
-        justPressedButtons[buttonIndex] = (currButtonIsPressed && !heldDownButtons[buttonIndex]);
-        heldDownButtons[buttonIndex] = currButtonIsPressed;
+        int slot = button.ordinal();
+        boolean currButtonIsPressed = nativeCheckButton(controllerPtr, button.getSdlValue());
+        justPressedButtons[slot] = (currButtonIsPressed && !heldDownButtons[slot]);
+        heldDownButtons[slot] = currButtonIsPressed;
     }
 
     private native boolean nativeCheckButton(long controllerPtr, int buttonIndex); /*
-        SDL_GameControllerUpdate();
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        return SDL_GameControllerGetButton(pad, (SDL_GameControllerButton) buttonIndex);
+        SDL_UpdateGamepads();
+        return SDL_GetGamepadButton(jamepad_pad(controllerPtr), (SDL_GamepadButton) buttonIndex) ? JNI_TRUE : JNI_FALSE;
     */
 
     /**
@@ -463,12 +663,11 @@ public final class ControllerIndex {
      */
     public boolean isButtonAvailable(ControllerButton toCheck) throws ControllerUnpluggedException {
         ensureConnected();
-        return nativeButtonAvailable(controllerPtr, toCheck.ordinal());
+        return nativeButtonAvailable(controllerPtr, toCheck.getSdlValue());
     }
 
     private native boolean nativeButtonAvailable(long controllerPtr, int buttonIndex); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        return SDL_GameControllerHasButton(pad, (SDL_GameControllerButton) buttonIndex);
+        return SDL_GamepadHasButton(jamepad_pad(controllerPtr), (SDL_GamepadButton) buttonIndex) ? JNI_TRUE : JNI_FALSE;
     */
 
     /**
@@ -481,13 +680,12 @@ public final class ControllerIndex {
     public float getAxisState(ControllerAxis toCheck) throws ControllerUnpluggedException {
         ensureConnected();
 
-        return nativeCheckAxis(controllerPtr, toCheck.ordinal()) / AXIS_MAX_VAL;
+        return nativeCheckAxis(controllerPtr, toCheck.getSdlValue()) / AXIS_MAX_VAL;
     }
 
     private native int nativeCheckAxis(long controllerPtr, int axisIndex); /*
-        SDL_GameControllerUpdate();
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        return SDL_GameControllerGetAxis(pad, (SDL_GameControllerAxis) axisIndex);
+        SDL_UpdateGamepads();
+        return SDL_GetGamepadAxis(jamepad_pad(controllerPtr), (SDL_GamepadAxis) axisIndex);
     */
 
     /**
@@ -498,12 +696,11 @@ public final class ControllerIndex {
      */
     public boolean isAxisAvailable(ControllerAxis toCheck) throws ControllerUnpluggedException {
         ensureConnected();
-        return nativeAxisAvailable(controllerPtr, toCheck.ordinal());
+        return nativeAxisAvailable(controllerPtr, toCheck.getSdlValue());
     }
 
     private native boolean nativeAxisAvailable(long controllerPtr, int axisIndex); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        return SDL_GameControllerHasAxis(pad, (SDL_GameControllerAxis) axisIndex);
+        return SDL_GamepadHasAxis(jamepad_pad(controllerPtr), (SDL_GamepadAxis) axisIndex) ? JNI_TRUE : JNI_FALSE;
     */
 
     /**
@@ -525,8 +722,8 @@ public final class ControllerIndex {
     }
 
     private native String nativeGetName(long controllerPtr); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        return env->NewStringUTF(SDL_GameControllerName(pad));
+        const char* name = SDL_GetGamepadName(jamepad_pad(controllerPtr));
+        return name == NULL ? NULL : env->NewStringUTF(name);
     */
 
     /**
@@ -542,8 +739,7 @@ public final class ControllerIndex {
     }
 
     private native int nativeGetDeviceInstanceID(long controllerPtr); /*
-        SDL_Joystick* joystick = SDL_GameControllerGetJoystick((SDL_GameController*) controllerPtr);
-        return SDL_JoystickInstanceID(joystick);
+        return (jint) SDL_GetJoystickID(jamepad_joystick(controllerPtr));
      */
 
     /**
@@ -555,8 +751,7 @@ public final class ControllerIndex {
     }
 
     private native int nativeGetPlayerIndex(long controllerPtr); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        return SDL_GameControllerGetPlayerIndex(pad);
+        return SDL_GetGamepadPlayerIndex(jamepad_pad(controllerPtr));
     */
 
     /**
@@ -570,22 +765,41 @@ public final class ControllerIndex {
     }
 
     private native void nativeSetPlayerIndex(long controllerPtr, int index); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        return SDL_GameControllerSetPlayerIndex(pad, index);
+        SDL_SetGamepadPlayerIndex(jamepad_pad(controllerPtr), index);
     */
 
     /**
-     * @return current power level of game controller, see {@link ControllerPowerLevel} enum values
+     * @return current power state of the game controller, see {@link ControllerPowerLevel} enum values
      * @throws ControllerUnpluggedException If the controller is not connected
      */
     public ControllerPowerLevel getPowerLevel() throws ControllerUnpluggedException {
         ensureConnected();
-        return ControllerPowerLevel.valueOf(nativeGetPowerLevel(controllerPtr));
+        return ControllerPowerLevel.fromSdlValue(nativeGetPowerInfo(controllerPtr) >> 8);
     }
 
-    private native int nativeGetPowerLevel(long controllerPtr); /*
-        SDL_Joystick* joystick = SDL_GameControllerGetJoystick((SDL_GameController*) controllerPtr);
-        return SDL_JoystickCurrentPowerLevel(joystick);
+    /**
+     * Returns the remaining battery charge as a percentage.
+     *
+     * @return the battery charge between 0 and 100, or -1 if the controller cannot report it
+     * @throws ControllerUnpluggedException If the controller is not connected
+     */
+    public int getBatteryPercentage() throws ControllerUnpluggedException {
+        ensureConnected();
+        return (byte) (nativeGetPowerInfo(controllerPtr) & 0xFF);
+    }
+
+    /**
+     * SDL 3 reports the power state and the battery percentage together, so both come
+     * back packed into one int: the state in the high byte, the percentage in the low
+     * byte (as a signed byte, so an unknown percentage arrives as -1).
+     */
+    private native int nativeGetPowerInfo(long controllerPtr); /*
+        int percent = -1;
+        SDL_PowerState state = SDL_GetGamepadPowerInfo(jamepad_pad(controllerPtr), &percent);
+        if (percent < 0 || percent > 100) {
+            percent = -1;
+        }
+        return ((int) state << 8) | (percent & 0xFF);
     */
 
 
@@ -615,17 +829,15 @@ public final class ControllerIndex {
     }
 
     private native void nativeGetTouchpadFinger(long controllerPtr, int finger, Object touchState); /*
-        SDL_GameControllerUpdate();
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
+        SDL_UpdateGamepads();
 
-        Uint8 touch_state;
+        bool down = false;
         float x, y, pressure;
-        int result = SDL_GameControllerGetTouchpadFinger(pad, 0, finger, &touch_state, &x, &y, &pressure);
-        if(result == 0) {
+        if(SDL_GetGamepadTouchpadFinger(jamepad_pad(controllerPtr), 0, finger, &down, &x, &y, &pressure)) {
             jclass clazz = env->GetObjectClass(touchState);
             jmethodID update_method = env->GetMethodID(clazz, "update", "(ZFF)V");
 
-            env->CallVoidMethod(touchState, update_method, touch_state == 0 ? JNI_FALSE : JNI_TRUE, x, y);
+            env->CallVoidMethod(touchState, update_method, down ? JNI_TRUE : JNI_FALSE, x, y);
         }
      */
 
@@ -633,8 +845,8 @@ public final class ControllerIndex {
      * To use this function Sony controller features must be enabled in configuration of the
      * {@link com.studiohartman.jamepad.ControllerManager}.
      * @return a SensorState object containing the sensor information of the controller.
-     * If Sony controller features are not enabled or if the controller doesn't support sensor
-     * data then a default SensorState will be returned.
+     * If {@link Configuration#useControllerMotionSensors} is off, or the controller has no
+     * motion hardware, a default SensorState will be returned.
      * @throws ControllerUnpluggedException If the controller is not connected
      */
     public SensorState getSensorState() throws ControllerUnpluggedException {
@@ -647,25 +859,9 @@ public final class ControllerIndex {
         return sensorState;
     }
 
-    /*JNI
-    #include <chrono>
-     */
-
     private native void nativeGetSensorState(long controllerPtr, Object sensorState);/*
-        SDL_GameControllerUpdate();
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-
-        float gyro_data[3], accel_data[3];
-		int resultGyro = SDL_GameControllerGetSensorData(pad, SDL_SENSOR_GYRO, &gyro_data[0], 3);
-		int resultAccel = SDL_GameControllerGetSensorData(pad, SDL_SENSOR_ACCEL, &accel_data[0], 3);
-		Uint64 microsecondsSinceEpoch = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-
-		if(resultGyro == 0 && resultAccel == 0) {
-		   jclass clazz = env->GetObjectClass(sensorState);
-		   jmethodID update_method = env->GetMethodID(clazz, "update", "(FFFFFFJ)V");
-
-		   env->CallVoidMethod(sensorState, update_method, accel_data[0], accel_data[1], accel_data[2], gyro_data[0], gyro_data[1], gyro_data[2], microsecondsSinceEpoch);
-		}
+        SDL_UpdateGamepads();
+        jamepad_read_sensor_state(env, jamepad_pad(controllerPtr), sensorState);
     */
 
     /**
@@ -690,13 +886,13 @@ public final class ControllerIndex {
     }
 
     private native boolean nativeIsDualSenseController(long controllerPtr); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
+        SDL_Gamepad* pad = jamepad_pad(controllerPtr);
         Uint16 sonyVendorId = 0x054c;
         Uint16 dualSenseProductId = 0x0ce6;
         Uint16 dualSenseEdgeProductId = 0x0df2;
 
-        Uint16 vendorId = SDL_GameControllerGetVendor(pad);
-        Uint16 productId = SDL_GameControllerGetProduct(pad);
+        Uint16 vendorId = SDL_GetGamepadVendor(pad);
+        Uint16 productId = SDL_GetGamepadProduct(pad);
 
         return vendorId == sonyVendorId && (productId == dualSenseProductId || productId == dualSenseEdgeProductId) ? JNI_TRUE : JNI_FALSE;
     */
@@ -737,7 +933,7 @@ public final class ControllerIndex {
                                                             byte rightTriggerEffect,
                                                             byte[] triggerDataRight,
                                                             int rightTriggerDataSize); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
+        SDL_Gamepad* pad = jamepad_pad(controllerPtr);
 
         DS5EffectsState_t state;
         SDL_zero(state);
@@ -748,7 +944,7 @@ public final class ControllerIndex {
         state.rgucRightTriggerEffect[0] = rightTriggerEffect;
         SDL_memcpy(state.rgucRightTriggerEffect + 1, triggerDataRight, rightTriggerDataSize);
 
-        return SDL_GameControllerSendEffect(pad, &state, sizeof(state)) == 0 ? JNI_TRUE : JNI_FALSE;
+        return SDL_SendGamepadEffect(pad, &state, sizeof(state)) ? JNI_TRUE : JNI_FALSE;
     */
 
     /**
@@ -770,33 +966,30 @@ public final class ControllerIndex {
     }
 
     private native boolean nativeSendHapticFeedback(byte[] hapticFeedback, int hapticFeedbackSize); /*
-        if(haptics_output == 0) {
+        if(haptics_stream == NULL) {
             return JNI_FALSE;
         }
 
-        SDL_AudioCVT cvt;
-        // Haptics samples are coming in at 3KHZ, but the DualSense expects 48KHZ
-        SDL_BuildAudioCVT(&cvt, AUDIO_S16LSB, 4, 3000, AUDIO_S16LSB, 4, 48000);
-        cvt.len = hapticFeedbackSize * 2;
-        cvt.buf = haptics_resampler_buf;
-        // Remix to 4 channels
-	    for (int i=0; i < hapticFeedbackSize; i+=4)
+        //Input is 3kHz stereo; the DualSense wants the haptics on channels 3 and 4 of a
+        //4-channel stream, so every 4-byte frame becomes 8 bytes with the speaker pair silenced.
+        int remixed = hapticFeedbackSize * 2;
+        if (remixed > haptics_remix_capacity) {
+            Uint8 *grown = (Uint8 *) SDL_realloc(haptics_remix_buf, remixed);
+            if (grown == NULL) {
+                return JNI_FALSE;
+            }
+            haptics_remix_buf = grown;
+            haptics_remix_capacity = remixed;
+        }
+
+	    for (int i = 0; i + 4 <= hapticFeedbackSize; i += 4)
 	    {
-		    SDL_memset(haptics_resampler_buf + i * 2, 0, 4);
-		    SDL_memcpy(haptics_resampler_buf + (i * 2) + 4, hapticFeedback + i, 4);
-	    }
-	    // Resample to 48kHZ
-	    if (SDL_ConvertAudio(&cvt) != 0)
-	    {
-		    return JNI_FALSE;
+		    SDL_memset(haptics_remix_buf + i * 2, 0, 4);
+		    SDL_memcpy(haptics_remix_buf + (i * 2) + 4, hapticFeedback + i, 4);
 	    }
 
-	    if (SDL_QueueAudio(haptics_output, cvt.buf, cvt.len_cvt) < 0)
-	    {
-		    return JNI_FALSE;
-	    }
-
-	    return JNI_TRUE;
+	    //SDL 3 resamples 3kHz -> 48kHz inside the stream.
+	    return SDL_PutAudioStreamData(haptics_stream, haptics_remix_buf, remixed) ? JNI_TRUE : JNI_FALSE;
     */
 
     /**
@@ -809,9 +1002,7 @@ public final class ControllerIndex {
     }
 
     private native int nativeGetNumRawButtons(long controllerPtr); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        SDL_Joystick* joy = SDL_GameControllerGetJoystick(pad);
-        return SDL_JoystickNumButtons(joy);
+        return SDL_GetNumJoystickButtons(jamepad_joystick(controllerPtr));
     */
 
     /**
@@ -824,9 +1015,7 @@ public final class ControllerIndex {
     }
 
     private native int nativeGetNumRawAxes(long controllerPtr); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        SDL_Joystick* joy = SDL_GameControllerGetJoystick(pad);
-        return SDL_JoystickNumAxes(joy);
+        return SDL_GetNumJoystickAxes(jamepad_joystick(controllerPtr));
     */
 
     /**
@@ -845,9 +1034,7 @@ public final class ControllerIndex {
     }
 
     private native boolean nativeGetRawButtonPressed(long controllerPtr, int buttonIndex); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        SDL_Joystick* joy = SDL_GameControllerGetJoystick(pad);
-        return SDL_JoystickGetButton(joy, buttonIndex) ? JNI_TRUE : JNI_FALSE;
+        return SDL_GetJoystickButton(jamepad_joystick(controllerPtr), buttonIndex) ? JNI_TRUE : JNI_FALSE;
     */
 
     /**
@@ -867,9 +1054,7 @@ public final class ControllerIndex {
     }
 
     private native int nativeGetRawAxisState(long controllerPtr, int axisIndex); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        SDL_Joystick* joy = SDL_GameControllerGetJoystick(pad);
-        return SDL_JoystickGetAxis(joy, axisIndex);
+        return SDL_GetJoystickAxis(jamepad_joystick(controllerPtr), axisIndex);
     */
 
     /**
@@ -882,9 +1067,7 @@ public final class ControllerIndex {
     }
 
     private native int nativeGetVendorId(long controllerPtr); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        SDL_Joystick* joy = SDL_GameControllerGetJoystick(pad);
-        return SDL_JoystickGetVendor(joy);
+        return SDL_GetJoystickVendor(jamepad_joystick(controllerPtr));
     */
 
     /**
@@ -897,9 +1080,7 @@ public final class ControllerIndex {
     }
 
     private native int nativeGetProductId(long controllerPtr); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        SDL_Joystick* joy = SDL_GameControllerGetJoystick(pad);
-        return SDL_JoystickGetProduct(joy);
+        return SDL_GetJoystickProduct(jamepad_joystick(controllerPtr));
     */
 
     /**
@@ -916,9 +1097,8 @@ public final class ControllerIndex {
     }
 
     private native String nativeGetDeviceName(long controllerPtr); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        SDL_Joystick* joy = SDL_GameControllerGetJoystick(pad);
-        return env->NewStringUTF(SDL_JoystickName(joy));
+        const char* name = SDL_GetJoystickName(jamepad_joystick(controllerPtr));
+        return name == NULL ? NULL : env->NewStringUTF(name);
     */
 
     /**
@@ -936,12 +1116,9 @@ public final class ControllerIndex {
     }
 
     private native String nativeGetDeviceGuid(long controllerPtr); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        SDL_Joystick* joy = SDL_GameControllerGetJoystick(pad);
-
-        SDL_JoystickGUID guid = SDL_JoystickGetGUID(joy);
+        SDL_GUID guid = SDL_GetJoystickGUID(jamepad_joystick(controllerPtr));
         char guid_str[33];
-        SDL_JoystickGetGUIDString(guid, guid_str, sizeof(guid_str));
+        SDL_GUIDToString(guid, guid_str, sizeof(guid_str));
         return env->NewStringUTF(guid_str);
     */
 
@@ -969,34 +1146,33 @@ public final class ControllerIndex {
 
     public float getAxisStateFast(ControllerAxis toCheck) throws ControllerUnpluggedException {
         ensureConnected();
-        return nativeCheckAxisNoUpdate(controllerPtr, toCheck.ordinal()) / AXIS_MAX_VAL;
+        return nativeCheckAxisNoUpdate(controllerPtr, toCheck.getSdlValue()) / AXIS_MAX_VAL;
     }
 
     private native int nativeCheckAxisNoUpdate(long controllerPtr, int axisIndex); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        return SDL_GameControllerGetAxis(pad, (SDL_GameControllerAxis) axisIndex);
+        return SDL_GetGamepadAxis(jamepad_pad(controllerPtr), (SDL_GamepadAxis) axisIndex);
     */
 
     public boolean isButtonPressedFast(ControllerButton toCheck) throws ControllerUnpluggedException {
-        updateButtonFast(toCheck.ordinal());
+        updateButtonFast(toCheck);
         return heldDownButtons[toCheck.ordinal()];
     }
 
     public boolean isButtonJustPressedFast(ControllerButton toCheck) throws ControllerUnpluggedException {
-        updateButtonFast(toCheck.ordinal());
+        updateButtonFast(toCheck);
         return justPressedButtons[toCheck.ordinal()];
     }
 
-    private void updateButtonFast(int buttonIndex) throws ControllerUnpluggedException {
+    private void updateButtonFast(ControllerButton button) throws ControllerUnpluggedException {
         ensureConnected();
-        boolean currButtonIsPressed = nativeCheckButtonNoUpdate(controllerPtr, buttonIndex);
-        justPressedButtons[buttonIndex] = (currButtonIsPressed && !heldDownButtons[buttonIndex]);
-        heldDownButtons[buttonIndex] = currButtonIsPressed;
+        int slot = button.ordinal();
+        boolean currButtonIsPressed = nativeCheckButtonNoUpdate(controllerPtr, button.getSdlValue());
+        justPressedButtons[slot] = (currButtonIsPressed && !heldDownButtons[slot]);
+        heldDownButtons[slot] = currButtonIsPressed;
     }
 
     private native boolean nativeCheckButtonNoUpdate(long controllerPtr, int buttonIndex); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-        return SDL_GameControllerGetButton(pad, (SDL_GameControllerButton) buttonIndex);
+        return SDL_GetGamepadButton(jamepad_pad(controllerPtr), (SDL_GamepadButton) buttonIndex) ? JNI_TRUE : JNI_FALSE;
     */
 
     public TouchState getTouchpadFingerFast(int finger) throws ControllerUnpluggedException {
@@ -1016,15 +1192,12 @@ public final class ControllerIndex {
     }
 
     private native void nativeGetTouchpadFingerNoUpdate(long controllerPtr, int finger, Object touchState); /*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-
-        Uint8 touch_state;
+        bool down = false;
         float x, y, pressure;
-        int result = SDL_GameControllerGetTouchpadFinger(pad, 0, finger, &touch_state, &x, &y, &pressure);
-        if(result == 0) {
+        if(SDL_GetGamepadTouchpadFinger(jamepad_pad(controllerPtr), 0, finger, &down, &x, &y, &pressure)) {
             jclass clazz = env->GetObjectClass(touchState);
             jmethodID update_method = env->GetMethodID(clazz, "update", "(ZFF)V");
-            env->CallVoidMethod(touchState, update_method, touch_state == 0 ? JNI_FALSE : JNI_TRUE, x, y);
+            env->CallVoidMethod(touchState, update_method, down ? JNI_TRUE : JNI_FALSE, x, y);
         }
     */
 
@@ -1038,25 +1211,6 @@ public final class ControllerIndex {
     }
 
     private native void nativeGetSensorStateNoUpdate(long controllerPtr, Object sensorState);/*
-        SDL_GameController* pad = (SDL_GameController*) controllerPtr;
-
-        float gyro_data[3], accel_data[3];
-        int resultGyro  = SDL_GameControllerGetSensorData(pad, SDL_SENSOR_GYRO,  &gyro_data[0], 3);
-        int resultAccel = SDL_GameControllerGetSensorData(pad, SDL_SENSOR_ACCEL, &accel_data[0], 3);
-
-        Uint64 microsecondsSinceEpoch =
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::system_clock::now().time_since_epoch()
-            ).count();
-
-        if(resultGyro == 0 && resultAccel == 0) {
-            jclass clazz = env->GetObjectClass(sensorState);
-            jmethodID update_method = env->GetMethodID(clazz, "update", "(FFFFFFJ)V");
-            env->CallVoidMethod(sensorState, update_method,
-                accel_data[0], accel_data[1], accel_data[2],
-                gyro_data[0], gyro_data[1], gyro_data[2],
-                microsecondsSinceEpoch
-            );
-        }
+        jamepad_read_sensor_state(env, jamepad_pad(controllerPtr), sensorState);
     */
 }
