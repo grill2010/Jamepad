@@ -615,6 +615,40 @@ public final class ControllerIndex {
     }
 
     /**
+     * @return true if the controller has an RGB LED that {@link #setLedColor} can drive
+     * (e.g. the light bar of a DualSense or DualShock 4)
+     * @throws ControllerUnpluggedException If the controller is not connected
+     */
+    public boolean isSupportingLedColor() throws ControllerUnpluggedException {
+        ensureConnected();
+        return nativeIsSupportingLedColor(controllerPtr);
+    }
+
+    private native boolean nativeIsSupportingLedColor(long controllerPtr); /*
+        SDL_PropertiesID props = SDL_GetGamepadProperties(jamepad_pad(controllerPtr));
+        return SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false) ? JNI_TRUE : JNI_FALSE;
+    */
+
+    /**
+     * Sets the color of the controller RGB LED (e.g. the light bar of a DualSense or DualShock 4).
+     * Calling this on a controller without an RGB LED has no effect and returns false.
+     *
+     * @param red   the red intensity (0 to 255, passed as an unsigned byte)
+     * @param green the green intensity (0 to 255, passed as an unsigned byte)
+     * @param blue  the blue intensity (0 to 255, passed as an unsigned byte)
+     * @return true if the LED color was set successfully, false otherwise
+     * @throws ControllerUnpluggedException If the controller is not connected
+     */
+    public boolean setLedColor(byte red, byte green, byte blue) throws ControllerUnpluggedException {
+        ensureConnected();
+        return nativeSetLedColor(controllerPtr, red, green, blue);
+    }
+
+    private native boolean nativeSetLedColor(long controllerPtr, byte red, byte green, byte blue); /*
+        return SDL_SetGamepadLED(jamepad_pad(controllerPtr), (Uint8) red, (Uint8) green, (Uint8) blue) ? JNI_TRUE : JNI_FALSE;
+    */
+
+    /**
      * Returns whether or not a given button has been pressed.
      *
      * @param toCheck The ControllerButton to check the state of
