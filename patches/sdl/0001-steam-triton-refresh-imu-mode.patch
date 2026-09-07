@@ -1,0 +1,83 @@
+Refresh SETTING_IMU_MODE on the Steam Controller watchdog cadence.
+
+The controller runs a Steam watchdog that restores its default settings block when
+nothing keeps refreshing it, which is why the Triton driver already re-sends
+SETTING_LIZARD_MODE every three seconds. SETTING_IMU_MODE lives in that same settings
+block but was written exactly once, when sensors were first enabled, so a few seconds
+after a gamepad opened the controller stopped sampling its IMU. The driver kept
+decoding reports and reporting sensor data, but every gyro and accelerometer field
+was zero, so motion looked dead unless Steam happened to be running and refreshing
+the setting itself.
+
+Lift the write into a helper next to DisableSteamTritonLizardMode and refresh it on
+the same timer whenever sensors are enabled.
+diff --git a/src/joystick/hidapi/SDL_hidapi_steam_triton.c b/src/joystick/hidapi/SDL_hidapi_steam_triton.c
+index 01e4efff9..89a27320f 100644
+--- a/src/joystick/hidapi/SDL_hidapi_steam_triton.c
++++ b/src/joystick/hidapi/SDL_hidapi_steam_triton.c
+@@ -147,6 +147,29 @@ static bool DisableSteamTritonLizardMode(SDL_hid_device *dev)
+     return true;
+ }
+ 
++static bool SetSteamTritonIMUMode(SDL_hid_device *dev, bool enabled)
++{
++    int rc;
++    Uint8 buffer[HID_FEATURE_REPORT_BYTES] = { 1 };
++    FeatureReportMsg *msg = (FeatureReportMsg *)(buffer + 1);
++
++    msg->header.type = ID_SET_SETTINGS_VALUES;
++    msg->header.length = 1 * sizeof(ControllerSetting);
++    msg->payload.setSettingsValues.settings[0].settingNum = SETTING_IMU_MODE;
++    if (enabled) {
++        msg->payload.setSettingsValues.settings[0].settingValue = (SETTING_GYRO_MODE_SEND_RAW_ACCEL | SETTING_GYRO_MODE_SEND_RAW_GYRO);
++    } else {
++        msg->payload.setSettingsValues.settings[0].settingValue = SETTING_GYRO_MODE_OFF;
++    }
++
++    rc = SDL_hid_send_feature_report(dev, buffer, sizeof(buffer));
++    if (rc != sizeof(buffer)) {
++        return false;
++    }
++
++    return true;
++}
++
+ // Triton newer state MTUs are identical until touchpads. Parse them using this routine.
+ // Expects report to be a TritonMTUNoQuat_t, so cast as needed
+ static void HIDAPI_DriverSteamTriton_HandleGenericState(SDL_DriverSteamTriton_Context *ctx, SDL_Joystick *joystick, Uint64 timestamp, TritonMTUNoQuat_t *pTritonReport)
+@@ -499,6 +522,12 @@ static bool HIDAPI_DriverSteamTriton_UpdateDevice(SDL_HIDAPI_Device *device)
+         Uint64 now = SDL_GetTicks();
+         if (!ctx->last_lizard_update || (now - ctx->last_lizard_update) >= 3000) {
+             DisableSteamTritonLizardMode(device->dev);
++            // The watchdog restores the whole settings block, not just lizard mode, so the IMU has to
++            // be refreshed on the same cadence. Without this the controller stops sampling a few
++            // seconds in and keeps sending reports whose sensor fields are all zero.
++            if (ctx->report_sensors) {
++                SetSteamTritonIMUMode(device->dev, true);
++            }
+             ctx->last_lizard_update = now;
+         }
+ 
+@@ -652,21 +681,8 @@ static bool HIDAPI_DriverSteamTriton_SendJoystickEffect(SDL_HIDAPI_Device *devic
+ static bool HIDAPI_DriverSteamTriton_SetSensorsEnabled(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, bool enabled)
+ {
+     SDL_DriverSteamTriton_Context *ctx = (SDL_DriverSteamTriton_Context *)device->context;
+-    int rc;
+-    Uint8 buffer[HID_FEATURE_REPORT_BYTES] = { 1 };
+-    FeatureReportMsg *msg = (FeatureReportMsg *)(buffer + 1);
+-
+-    msg->header.type = ID_SET_SETTINGS_VALUES;
+-    msg->header.length = 1 * sizeof(ControllerSetting);
+-    msg->payload.setSettingsValues.settings[0].settingNum = SETTING_IMU_MODE;
+-    if (enabled) {
+-        msg->payload.setSettingsValues.settings[0].settingValue = (SETTING_GYRO_MODE_SEND_RAW_ACCEL | SETTING_GYRO_MODE_SEND_RAW_GYRO);
+-    } else {
+-        msg->payload.setSettingsValues.settings[0].settingValue = SETTING_GYRO_MODE_OFF;
+-    }
+ 
+-    rc = SDL_hid_send_feature_report(device->dev, buffer, sizeof(buffer));
+-    if (rc != sizeof(buffer)) {
++    if (!SetSteamTritonIMUMode(device->dev, enabled)) {
+         return false;
+     }
+ 
