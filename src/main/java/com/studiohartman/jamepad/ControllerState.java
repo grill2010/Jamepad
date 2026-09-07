@@ -384,7 +384,7 @@ public final class ControllerState implements Serializable {
                 touchStateFinger0 = new TouchState();
                 touchStateFinger0.update(c.getTouchpadFingerFast(0));
                 touchStateFinger1 = new TouchState();
-                touchStateFinger1.update(c.getTouchpadFingerFast(0));
+                touchStateFinger1.update(c.getTouchpadFingerFast(1));
             }
 
             if(c.isSupportingSensorData()) {

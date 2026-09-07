@@ -137,6 +137,8 @@ public final class ControllerIndex {
 
     private boolean supportsTouchpad = false;
 
+    private int numTouchpads = 0;
+
     private boolean supportsSensors = false;
 
     private boolean hasAccelerometer = false;
@@ -149,6 +151,11 @@ public final class ControllerIndex {
 
     private final SensorState sensorState = new SensorState();
 
+    /**
+     * Keyed by touchpad and finger together, see {@link #touchStateKey(int, int)}. Keying on the finger
+     * alone would hand out the same instance for finger 0 of every touchpad, so a controller with more
+     * than one touchpad, a Steam Deck for instance, would see its pads overwrite each other.
+     */
     private final Map<Integer, TouchState> touchStates = new HashMap<>();
 
     private Timer hapticsTimer;
@@ -186,6 +193,7 @@ public final class ControllerIndex {
         if (controllerPtr == 0) {
             controllerGuid = EMPTY_GUID;
             supportsTouchpad = false;
+            numTouchpads = 0;
             supportsSensors = false;
             hasAccelerometer = false;
             hasGyroscope = false;
@@ -194,7 +202,8 @@ public final class ControllerIndex {
         }
         controllerGuid = nativeGetDeviceGuid(controllerPtr);
         if(!Objects.equals(Configuration.SonyControllerFeature.NONE, sonyControllerFeature)) {
-            supportsTouchpad = nativeIsTouchpadSupported(controllerPtr);
+            numTouchpads = nativeGetNumTouchpads(controllerPtr);
+            supportsTouchpad = numTouchpads > 0;
         }
         if(motionSensorsRequested) {
             int enabledSensors = nativeEnableSensors(controllerPtr);
@@ -302,8 +311,8 @@ public final class ControllerIndex {
         return result;
     */
 
-    private native boolean nativeIsTouchpadSupported(long controllerPtr); /*{
-        return SDL_GetNumGamepadTouchpads(jamepad_pad(controllerPtr)) > 0 ? JNI_TRUE : JNI_FALSE;
+    private native int nativeGetNumTouchpads(long controllerPtr); /*{
+        return (jint) SDL_GetNumGamepadTouchpads(jamepad_pad(controllerPtr));
     }*/
 
     private static final int SENSOR_ACCEL = 1;
@@ -471,6 +480,32 @@ public final class ControllerIndex {
     public boolean isSupportingTouchpadData() {
         return supportsTouchpad;
     }
+
+    /**
+     * @return how many touchpads this controller has, 0 when it has none or when Sony controller
+     * features are off. A DualSense reports one, a Steam Deck reports two.
+     */
+    public int getNumTouchpads() {
+        return numTouchpads;
+    }
+
+    /**
+     * @param touchpad the index of the touchpad of interest, below {@link #getNumTouchpads()}
+     * @return how many fingers that touchpad can track at once, 0 when the index is out of range or
+     * when Sony controller features are off
+     * @throws ControllerUnpluggedException If the controller is not connected
+     */
+    public int getNumTouchpadFingers(int touchpad) throws ControllerUnpluggedException {
+        ensureConnected();
+        if (!supportsTouchpad) {
+            return 0;
+        }
+        return nativeGetNumTouchpadFingers(controllerPtr, touchpad);
+    }
+
+    private native int nativeGetNumTouchpadFingers(long controllerPtr, int touchpad); /*{
+        return (jint) SDL_GetNumGamepadTouchpadFingers(jamepad_pad(controllerPtr), touchpad);
+    }*/
 
     /**
      * @return true if motion sensors were requested through
@@ -847,31 +882,41 @@ public final class ControllerIndex {
      * @throws ControllerUnpluggedException If the controller is not connected
      */
     public TouchState getTouchpadFinger(int finger) throws ControllerUnpluggedException {
+        return getTouchpadFinger(0, finger);
+    }
+
+    /**
+     * To use this function Sony controller features must be enabled in configuration of the
+     * {@link com.studiohartman.jamepad.ControllerManager}.
+     * @param touchpad the index of the touchpad of interest, below {@link #getNumTouchpads()}
+     * @param finger the index of the finger of interest
+     * @return a TouchState object containing the touch information of the finger.
+     * If the operation was not successful e.g. because the controller doesn't have
+     * a touchpad then a default TouchState object is returned.
+     * @throws ControllerUnpluggedException If the controller is not connected
+     */
+    public TouchState getTouchpadFinger(int touchpad, int finger) throws ControllerUnpluggedException {
         ensureConnected();
 
-        TouchState touchState = touchStates.get(finger);
-        if(touchState == null){
-            touchState = new TouchState();
-            touchStates.put(finger, touchState);
-        }
+        TouchState touchState = touchStateFor(touchpad, finger);
         if(!supportsTouchpad){
             return touchState;
         }
-        nativeGetTouchpadFinger(controllerPtr, finger, touchState);
+        nativeGetTouchpadFinger(controllerPtr, touchpad, finger, touchState);
 
         return touchState;
     }
 
-    private native void nativeGetTouchpadFinger(long controllerPtr, int finger, Object touchState); /*
+    private native void nativeGetTouchpadFinger(long controllerPtr, int touchpad, int finger, Object touchState); /*
         SDL_UpdateGamepads();
 
         bool down = false;
         float x, y, pressure;
-        if(SDL_GetGamepadTouchpadFinger(jamepad_pad(controllerPtr), 0, finger, &down, &x, &y, &pressure)) {
+        if(SDL_GetGamepadTouchpadFinger(jamepad_pad(controllerPtr), touchpad, finger, &down, &x, &y, &pressure)) {
             jclass clazz = env->GetObjectClass(touchState);
-            jmethodID update_method = env->GetMethodID(clazz, "update", "(ZFF)V");
+            jmethodID update_method = env->GetMethodID(clazz, "update", "(ZFFF)V");
 
-            env->CallVoidMethod(touchState, update_method, down ? JNI_TRUE : JNI_FALSE, x, y);
+            env->CallVoidMethod(touchState, update_method, down ? JNI_TRUE : JNI_FALSE, x, y, pressure);
         }
      */
 
@@ -1210,30 +1255,48 @@ public final class ControllerIndex {
     */
 
     public TouchState getTouchpadFingerFast(int finger) throws ControllerUnpluggedException {
+        return getTouchpadFingerFast(0, finger);
+    }
+
+    public TouchState getTouchpadFingerFast(int touchpad, int finger) throws ControllerUnpluggedException {
         ensureConnected();
 
-        TouchState touchState = touchStates.get(finger);
-        if (touchState == null) {
-            touchState = new TouchState();
-            touchStates.put(finger, touchState);
-        }
+        TouchState touchState = touchStateFor(touchpad, finger);
         if (!supportsTouchpad) {
             return touchState;
         }
 
-        nativeGetTouchpadFingerNoUpdate(controllerPtr, finger, touchState);
+        nativeGetTouchpadFingerNoUpdate(controllerPtr, touchpad, finger, touchState);
         return touchState;
     }
 
-    private native void nativeGetTouchpadFingerNoUpdate(long controllerPtr, int finger, Object touchState); /*
+    private native void nativeGetTouchpadFingerNoUpdate(long controllerPtr, int touchpad, int finger, Object touchState); /*
         bool down = false;
         float x, y, pressure;
-        if(SDL_GetGamepadTouchpadFinger(jamepad_pad(controllerPtr), 0, finger, &down, &x, &y, &pressure)) {
+        if(SDL_GetGamepadTouchpadFinger(jamepad_pad(controllerPtr), touchpad, finger, &down, &x, &y, &pressure)) {
             jclass clazz = env->GetObjectClass(touchState);
-            jmethodID update_method = env->GetMethodID(clazz, "update", "(ZFF)V");
-            env->CallVoidMethod(touchState, update_method, down ? JNI_TRUE : JNI_FALSE, x, y);
+            jmethodID update_method = env->GetMethodID(clazz, "update", "(ZFFF)V");
+            env->CallVoidMethod(touchState, update_method, down ? JNI_TRUE : JNI_FALSE, x, y, pressure);
         }
     */
+
+    /**
+     * Returns this controller's reusable TouchState for a touchpad and finger pair, creating it on first
+     * use. Reusing the instances is what keeps the fast getters allocation free.
+     */
+    private TouchState touchStateFor(int touchpad, int finger) {
+        int key = touchStateKey(touchpad, finger);
+        TouchState touchState = touchStates.get(key);
+        if (touchState == null) {
+            touchState = new TouchState();
+            touchStates.put(key, touchState);
+        }
+        return touchState;
+    }
+
+    private static int touchStateKey(int touchpad, int finger) {
+        return (touchpad << 16) | (finger & 0xFFFF);
+    }
 
     public SensorState getSensorStateFast() throws ControllerUnpluggedException {
         ensureConnected();
