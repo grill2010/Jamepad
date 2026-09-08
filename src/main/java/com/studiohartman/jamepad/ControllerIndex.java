@@ -90,6 +90,34 @@ public final class ControllerIndex {
         }
     }
 
+    // Jamepad hands out controller state by polling, so nothing here ever reads the events SDL
+    // queues for every sample it gathers. Left in place they reach SDL_MAX_QUEUED_EVENTS, 65535 of
+    // them, within minutes of a controller with motion hardware being open, and from then on SDL
+    // refuses every new event whatever its type: the sensor updates the sample times above come
+    // from, and the device added and removed ones hot plug is noticed by. The sample times freeze
+    // for as long as the process lives while the readings themselves keep coming, because those are
+    // kept on the joystick rather than in the queue.
+    //
+    // Dropping them costs nothing, because the queue is only ever an output: a joystick's state is
+    // written before its event is built, a gamepad's buttons and axes are translated out of that
+    // state on each read rather than accumulated from events, the watcher that turns joystick events
+    // into gamepad ones has already run by the time an event is in the queue, and no part of SDL's
+    // own joystick code reads the queue back.
+    //
+    // Only events of the joystick and gamepad subsystems are dropped, and of those, none that
+    // anything here reads: not the four device added and removed ones ControllerManager takes for
+    // hot plug, and not the sensor updates taken above. Anything else in the process keeps its
+    // events.
+    static void jamepad_drain_polled_events() {
+        jamepad_take_sensor_events();
+
+        SDL_FlushEvents(SDL_EVENT_JOYSTICK_AXIS_MOTION, SDL_EVENT_JOYSTICK_BUTTON_UP);
+        SDL_FlushEvents(SDL_EVENT_JOYSTICK_BATTERY_UPDATED, SDL_EVENT_JOYSTICK_UPDATE_COMPLETE);
+        SDL_FlushEvents(SDL_EVENT_GAMEPAD_AXIS_MOTION, SDL_EVENT_GAMEPAD_BUTTON_UP);
+        SDL_FlushEvents(SDL_EVENT_GAMEPAD_REMAPPED, SDL_EVENT_GAMEPAD_TOUCHPAD_UP);
+        SDL_FlushEvents(SDL_EVENT_GAMEPAD_UPDATE_COMPLETE, SDL_EVENT_GAMEPAD_STEAM_HANDLE_UPDATED);
+    }
+
     static void jamepad_read_sensor_state(JNIEnv *env, SDL_Gamepad *pad, jobject sensorState) {
         float accel[3] = { 0.0f, 0.0f, 0.0f };
         float gyro[3] = { 0.0f, 0.0f, 0.0f };
@@ -285,6 +313,7 @@ public final class ControllerIndex {
 
     private native void nativePoll(long controllerPtr); /*
         SDL_UpdateGamepads();
+        jamepad_drain_polled_events();
     */
 
     /**
