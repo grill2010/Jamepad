@@ -375,6 +375,39 @@ public final class ControllerIndex {
     static Uint8 *haptics_remix_buf = NULL;
     static int haptics_remix_capacity = 0;
 
+    // Flow control for that stream. The console produces packets on its own clock and the
+    // controller consumes them on its own, with a jittery network in between and nothing
+    // reconciling the two, so the queue drifts one way and never comes back. Every millisecond
+    // of backlog is a millisecond of delay and a millisecond of amplitude the motors still owe,
+    // which is why a long session ends up feeling harsher than it started.
+    //
+    // SDL_GetAudioStreamQueued reports bytes still waiting in the stream's *input* format, so
+    // the budget is in the 3 kHz 4 channel signed 16 bit the stream is fed: 24 bytes per ms.
+    #define JAMEPAD_HAPTICS_QUEUED_BYTES_PER_MS (3000 * 4 * 2 / 1000)
+
+    // Hard ceiling. Past this the backlog is delay the player can feel, so it goes.
+    #define JAMEPAD_HAPTICS_MAX_QUEUED_MS 60
+
+    // Soft ceiling, only applied while the arriving packet is silent. Dropping during silence
+    // cannot cut an effect short, so the usual case resyncs without an audible seam.
+    #define JAMEPAD_HAPTICS_SILENT_QUEUED_MS 20
+
+    // Peak sample below which a packet counts as silence, the same threshold the Valve actuator
+    // path uses in HapticAnalyzerSettings.DEFAULT_SILENCE_PEAK: about -38 dBFS, well under any
+    // deliberate effect and above the noise floor of the console's own mix.
+    #define JAMEPAD_HAPTICS_SILENCE_PEAK 400
+
+    static bool jamepad_haptics_is_silent(const Uint8 *packet, int size) {
+        for (int i = 0; i + 2 <= size; i += 2) {
+            const Sint16 sample = (Sint16) ((Uint16) packet[i] | ((Uint16) packet[i + 1] << 8));
+            const int magnitude = sample < 0 ? -(int) sample : (int) sample;
+            if (magnitude >= JAMEPAD_HAPTICS_SILENCE_PEAK) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     static void jamepad_close_haptics() {
         if (haptics_stream != NULL) {
             SDL_DestroyAudioStream(haptics_stream);
@@ -1076,6 +1109,17 @@ public final class ControllerIndex {
     private native boolean nativeSendHapticFeedback(byte[] hapticFeedback, int hapticFeedbackSize); /*
         if(haptics_stream == NULL) {
             return JNI_FALSE;
+        }
+
+        //Retire a backlog before adding to it, see the flow control notes above. A healthy stream
+        //pays for one integer comparison per packet: the depth read is a cheap lock on the stream
+        //and the silence scan only runs once the queue has already grown past the soft ceiling.
+        const int queued = SDL_GetAudioStreamQueued(haptics_stream);
+        if (queued > JAMEPAD_HAPTICS_MAX_QUEUED_MS * JAMEPAD_HAPTICS_QUEUED_BYTES_PER_MS) {
+            SDL_ClearAudioStream(haptics_stream);
+        } else if (queued > JAMEPAD_HAPTICS_SILENT_QUEUED_MS * JAMEPAD_HAPTICS_QUEUED_BYTES_PER_MS
+                   && jamepad_haptics_is_silent((const Uint8 *) hapticFeedback, hapticFeedbackSize)) {
+            SDL_ClearAudioStream(haptics_stream);
         }
 
         //Input is 3kHz stereo; the DualSense wants the haptics on channels 3 and 4 of a
