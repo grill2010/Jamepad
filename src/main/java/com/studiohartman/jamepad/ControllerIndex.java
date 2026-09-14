@@ -1190,6 +1190,68 @@ public final class ControllerIndex {
     */
 
     /**
+     * Works out what SDL already takes each of this controller's raw buttons to mean.
+     * <p>
+     * A raw button index says nothing on its own, being however the device happens to number its buttons.
+     * The mapping SDL holds for the device is what turns one of them into, say, the east face button, or
+     * into a trigger on a device that reports its triggers as either fully pressed or not at all. This
+     * hands that correspondence back, so code holding a raw index can tell what pressing that button
+     * already means to {@link #isButtonPressed(ControllerButton)} and {@link #getAxisState(ControllerAxis)}.
+     * <p>
+     * Both arrays are indexed by raw button index and are filled for their whole length, so they can be
+     * sized with {@link #getNumRawButtons()} and read without checking anything else first. A raw button
+     * SDL has no meaning for, an extra paddle among them, reads as -1 in both.
+     *
+     * @param buttonForRawButton filled with the {@link ControllerButton#getSdlValue()} each raw button
+     *                           backs, or -1 where it backs no button
+     * @param axisForRawButton   filled with the {@link ControllerAxis#getSdlValue()} each raw button backs,
+     *                           or -1 where it backs no axis
+     * @return how many raw buttons SDL has a meaning for, which is none at all for a device it holds no
+     *         mapping for
+     * @throws ControllerUnpluggedException If the controller is not connected.
+     */
+    public int getRawButtonOutputs(int[] buttonForRawButton, int[] axisForRawButton) throws ControllerUnpluggedException {
+        ensureConnected();
+        Arrays.fill(buttonForRawButton, -1);
+        Arrays.fill(axisForRawButton, -1);
+        return nativeGetRawButtonOutputs(controllerPtr, buttonForRawButton, buttonForRawButton.length,
+                axisForRawButton, axisForRawButton.length);
+    }
+
+    private native int nativeGetRawButtonOutputs(long controllerPtr, int[] buttonForRawButton, int buttonLength,
+                                                 int[] axisForRawButton, int axisLength); /*
+        int bindingCount = 0;
+        SDL_GamepadBinding **bindings = SDL_GetGamepadBindings(jamepad_pad(controllerPtr), &bindingCount);
+        if (bindings == NULL) {
+            return 0;
+        }
+
+        int found = 0;
+        for (int i = 0; i < bindingCount; i++) {
+            const SDL_GamepadBinding *binding = bindings[i];
+            if (binding == NULL || binding->input_type != SDL_GAMEPAD_BINDTYPE_BUTTON) {
+                continue; //a hat or an axis is not a raw button, so it has nothing to say here
+            }
+
+            const int rawButton = binding->input.button;
+            if (binding->output_type == SDL_GAMEPAD_BINDTYPE_BUTTON) {
+                if (rawButton >= 0 && rawButton < buttonLength) {
+                    buttonForRawButton[rawButton] = (int) binding->output.button;
+                    ++found;
+                }
+            } else if (binding->output_type == SDL_GAMEPAD_BINDTYPE_AXIS) {
+                if (rawButton >= 0 && rawButton < axisLength) {
+                    axisForRawButton[rawButton] = (int) binding->output.axis.axis;
+                    ++found;
+                }
+            }
+        }
+
+        SDL_free(bindings);
+        return found;
+    */
+
+    /**
      * Returns the raw state of the specified axis index.
      * <p>
      * The returned value ranges from -32768 to 32767 depending on the axis position.
