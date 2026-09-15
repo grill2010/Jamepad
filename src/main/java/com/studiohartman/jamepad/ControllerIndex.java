@@ -173,7 +173,13 @@ public final class ControllerIndex {
 
     private boolean hasGyroscope = false;
 
-    private boolean supportsHaptic = false;
+    /**
+     * Volatile because it is written on the timer thread that connects the audio haptics a second after the
+     * controller arrives, and read on whichever thread feeds haptic packets. That reader now also gates the
+     * write on it, so a stale false would not merely delay the first effect, it would withhold haptics for
+     * as long as the value stayed unpublished.
+     */
+    private volatile boolean supportsHaptic = false;
 
     private boolean needToClearTriggerEffect = false;
 
@@ -275,7 +281,7 @@ public final class ControllerIndex {
                         return; // If not connected anymore skip connect haptics
                     }
 
-                    supportsHaptic = nativeConnectHaptics(IS_WINDOWS || IS_MAC, ControllerIndex.this);
+                    supportsHaptic = nativeConnectHaptics(IS_WINDOWS || IS_MAC, controllerPtr);
 
                     if (!supportsHaptic) {
                         if (count == 0) {
@@ -372,6 +378,15 @@ public final class ControllerIndex {
     // does the resampling that SDL_AudioCVT used to do by hand.
     static SDL_AudioDeviceID haptics_output = 0;
     static SDL_AudioStream *haptics_stream = NULL;
+
+    // Which controller the single output above belongs to, as an SDL joystick id, or 0 for none.
+    //
+    // There is one audio handle for the whole process and no way to tell two DualSense playback devices
+    // apart, since they carry the same name. So the handle has an owner, and only the owner is told it has
+    // haptics: a second DualSense answered yes would be feeding its player's effects into the first
+    // player's controller, because the stream leads there and nowhere else. It falls back to rumble
+    // instead, and over Bluetooth to whatever route the caller has for that transport.
+    static SDL_JoystickID haptics_owner = 0;
     static Uint8 *haptics_remix_buf = NULL;
     static int haptics_remix_capacity = 0;
 
@@ -417,6 +432,7 @@ public final class ControllerIndex {
             SDL_CloseAudioDevice(haptics_output);
             haptics_output = 0;
         }
+        haptics_owner = 0;
         if (haptics_remix_buf != NULL) {
             SDL_free(haptics_remix_buf);
             haptics_remix_buf = NULL;
@@ -430,9 +446,39 @@ public final class ControllerIndex {
         return SDL_WasInit(SDL_INIT_AUDIO) != 0 ? JNI_TRUE : JNI_FALSE;
     */
 
-    private native boolean nativeConnectHaptics(boolean isWindowsOrMac, Object instance); /*
+    private native boolean nativeConnectHaptics(boolean isWindowsOrMac, long controllerPtr); /*
+        SDL_Joystick *joystick = jamepad_joystick(controllerPtr);
+        const SDL_JoystickID id = SDL_GetJoystickID(joystick);
+        if(id == 0) {
+            //Closed or replaced between the connect and this call, which runs on a timer a second later.
+            //Zero is also the "nobody owns it" marker below, so claiming under it would both call a gone
+            //controller haptics-capable and leave the handle looking free to the next one along.
+            return JNI_FALSE;
+        }
+
+        //The audio interface these haptics travel over belongs to the controller's USB descriptor and does
+        //not exist over Bluetooth. So a wireless controller matching a device by name is matching some
+        //other controller's device: with a wired and a wireless DualSense in one session, whichever ran
+        //this first would win the handle, and had it been the wireless one it would have spent the whole
+        //session playing its haptics into the wired player's hands. Wireless DualSense haptics are the
+        //HID writer's job instead, and it needs this to answer no so it knows to take over.
+        //Only an explicit wireless answer is refused; a backend that cannot tell keeps its old behaviour.
+        if(SDL_GetJoystickConnectionState(joystick) == SDL_JOYSTICK_CONNECTION_WIRELESS) {
+            return JNI_FALSE;
+        }
+
         if(haptics_output != 0) {
-            return JNI_TRUE; // already initialized
+            if(haptics_owner == id) {
+                return JNI_TRUE; // already initialized, for this controller
+            }
+            //Somebody else holds it. If that controller is still attached the answer is simply no, see
+            //haptics_owner. If it is gone without having closed the handle, the handle is stranded:
+            //nothing could ever claim it again and the DualSense still in the session would be left on
+            //rumble for the rest of the process, so take it over.
+            if(haptics_owner != 0 && SDL_GetJoystickFromID(haptics_owner) != NULL) {
+                return JNI_FALSE;
+            }
+            jamepad_close_haptics();
         }
 
         int count = 0;
@@ -468,13 +514,21 @@ public final class ControllerIndex {
                 continue;
             }
 
-            //If the device did not really open with four channels, SDL will downmix and
-            //the two haptic channels disappear into the speaker mix.
+            //Only a four channel device can carry haptics: they are channels 3 and 4, and anything
+            //narrower means SDL downmixes them into the speaker instead. So a device that opened with
+            //fewer is not a haptic output, and claiming it would be worse than not finding one, because
+            //the caller would stop looking for a path that works.
+            //
+            //This is also what tells a DualSense apart from a DualShock 4, whose playback device carries
+            //the same "Wireless Controller" name on Windows and is not four channel. Matching on the name
+            //alone would open the wrong controller's speaker and report haptics support for it.
             SDL_AudioSpec actual;
             SDL_zero(actual);
             if (SDL_GetAudioDeviceFormat(opened, &actual, NULL) && actual.channels != 4) {
-                printf("NATIVE METHOD: DualSense haptics device \"%s\" opened with %d channels "
-                       "instead of 4, haptic channels will be lost\n", device_name, actual.channels);
+                printf("NATIVE METHOD: playback device \"%s\" opened with %d channels instead of 4, "
+                       "so it is not a DualSense haptic output\n", device_name, actual.channels);
+                SDL_CloseAudioDevice(opened);
+                continue;
             }
 
             SDL_AudioStream *stream = SDL_CreateAudioStream(&sourceSpec, &deviceSpec);
@@ -491,6 +545,7 @@ public final class ControllerIndex {
 
             haptics_output = opened;
             haptics_stream = stream;
+            haptics_owner = id;
             result = JNI_TRUE;
             break;
         }
@@ -524,11 +579,20 @@ public final class ControllerIndex {
     }
 
     private native void nativeClose(long controllerPtr); /*
+        //Only the controller the audio handle belongs to may close it. Closing it for any gamepad would
+        //have one player leaving a session take the haptics of the player still holding a DualSense, since
+        //the handle is process wide. Read the id before the gamepad goes, because it comes from the
+        //gamepad.
+        const bool owns_haptics = haptics_owner != 0
+                && haptics_owner == SDL_GetJoystickID(jamepad_joystick(controllerPtr));
+
         SDL_Gamepad* pad = jamepad_pad(controllerPtr);
         if(pad) {
             SDL_CloseGamepad(pad);
         }
-        jamepad_close_haptics();
+        if(owns_haptics) {
+            jamepad_close_haptics();
+        }
     */
 
     boolean isUsingSonyControllerFeatures() {
@@ -858,6 +922,31 @@ public final class ControllerIndex {
     */
 
     /**
+     * Returns the serial number this controller reports, which for a Sony pad is its Bluetooth address.
+     * <p>
+     * This is the only thing SDL exposes that identifies a physical controller rather than a model, so it
+     * is what lets a caller match a gamepad to the same device found through another API. Two controllers
+     * of one model are otherwise indistinguishable here: the vendor and product ids are equal, the names
+     * are equal, and the instance id and player index are SDL's own numbering, which nothing outside SDL
+     * knows about.
+     * <p>
+     * Not every controller has one. SDL fills it in for the devices its own HID drivers handle, which
+     * covers the DualSense and the DualShock 4 on either transport, and leaves it null for the rest.
+     *
+     * @return the serial number, or null when this controller does not report one
+     * @throws ControllerUnpluggedException If the controller is not connected
+     */
+    public String getSerial() throws ControllerUnpluggedException {
+        ensureConnected();
+        return nativeGetSerial(controllerPtr);
+    }
+
+    private native String nativeGetSerial(long controllerPtr); /*
+        const char* serial = SDL_GetGamepadSerial(jamepad_pad(controllerPtr));
+        return serial == NULL ? NULL : env->NewStringUTF(serial);
+    */
+
+    /**
      * Returns the instance ID of the current controller, which uniquely identifies
      * the device from the time it is connected until it is disconnected.
      *
@@ -1100,6 +1189,13 @@ public final class ControllerIndex {
         ensureConnected();
 
         if(!hasBasicDualSenseFeatures() || !nativeIsDualSenseController(controllerPtr)) {
+            return false;
+        }
+
+        // There is one audio stream for the whole process and it leads to whichever controller opened it,
+        // so a controller that does not hold it would be playing its packets in another player's hands.
+        // supportsHaptic is only true for the holder, see nativeConnectHaptics.
+        if(!supportsHaptic) {
             return false;
         }
 
