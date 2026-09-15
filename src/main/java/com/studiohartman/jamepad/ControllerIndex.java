@@ -1616,4 +1616,200 @@ public final class ControllerIndex {
     private native void nativeGetSensorStateNoUpdate(long controllerPtr, Object sensorState);/*
         jamepad_read_sensor_state(env, jamepad_pad(controllerPtr), sensorState);
     */
+
+    /***********************************/
+    /*** Bulk read (ONE JNI CALL) ***/
+    /***********************************/
+
+    /** Offset of the six axes in the float array, in {@link ControllerAxis} SDL order. */
+    public static final int STATE_AXES = 0;
+
+    /**
+     * Offset of touchpad 0's first two fingers, four floats each: whether the finger is down as
+     * 1 or 0, then x, y and pressure. Finger 1 therefore starts at {@code STATE_TOUCH + 4}.
+     */
+    public static final int STATE_TOUCH = 6;
+
+    /** Offset of the accelerometer x, y and z readings. */
+    public static final int STATE_ACCEL = 14;
+
+    /** Offset of the gyroscope x, y and z readings. */
+    public static final int STATE_GYRO = 17;
+
+    /** Required length of the float array passed to {@link #readStateFast(float[], long[])}. */
+    public static final int STATE_FLOATS = 20;
+
+    /**
+     * Required length of the timestamp array: the accelerometer sample time then the gyroscope
+     * one, in nanoseconds, matching {@link SensorState#getAccelTimestamp()} and
+     * {@link SensorState#getGyroTimestamp()}.
+     */
+    public static final int STATE_TIMESTAMPS = 2;
+
+    /**
+     * How many bits of the {@link #readStateFast(float[], long[])} mask are meaningful. Bit n
+     * reports the button whose {@link ControllerButton#getSdlValue()} is n, so this is one past the
+     * highest value any constant carries.
+     */
+    public static final int STATE_BUTTON_COUNT = buttonMaskWidth();
+
+    /**
+     * Derives the mask width from {@link ControllerButton} rather than stating it, so a button
+     * added upstream widens the mask on its own instead of going quietly missing from every read.
+     * Deliberately total: it cannot throw, because it runs during class initialisation, where an
+     * exception would be wrapped in an ExceptionInInitializerError and leave ControllerIndex
+     * permanently unusable for the life of the process.
+     */
+    private static int buttonMaskWidth() {
+        int widest = 0;
+        for (ControllerButton button : ControllerButton.values()) {
+            widest = Math.max(widest, button.getSdlValue() + 1);
+        }
+        // The mask is a long, so a button SDL numbers 64 or above has nowhere to go. Clamping keeps
+        // the shift defined and costs only that button, rather than risking the whole read.
+        return Math.min(widest, Long.SIZE);
+    }
+
+    /**
+     * Reads the whole controller in a single JNI call.
+     * <p>
+     * The per-field getters above cost one crossing each, so a streaming client that wants
+     * buttons, axes, touch and motion pays around twenty five per controller per poll, and every
+     * one of them takes SDL's global recursive joystick mutex that the rumble, LED and trigger
+     * writes on other threads also want. Worse, the touch and sensor getters each call back *into*
+     * Java to populate their result object, so the real crossing count is higher than the number of
+     * native methods suggests. Filling caller-owned primitive arrays removes both directions at
+     * once: one call down, nothing back up, and no allocation.
+     * <p>
+     * Both arrays belong to the caller and should be allocated once per controller and reused.
+     * Offsets are given by the {@code STATE_} constants. Values match what the individual getters
+     * return, axes included, which are normalised to -1..1 the same way
+     * {@link #getAxisStateFast(ControllerAxis)} normalises them.
+     * <p>
+     * Unlike {@link #isButtonPressedFast(ControllerButton)} this keeps no state of its own, so it
+     * does not disturb the held and just-pressed bookkeeping those getters share, and either style
+     * can be used without regard for the other. A caller that wants edge detection keeps the
+     * previous mask and takes {@code mask & ~previousMask}, which is cheaper than the per-button
+     * tracking anyway because it does every button at once.
+     * <p>
+     * Touch is limited to the first two fingers of touchpad 0, which is what a DualSense reports and
+     * what a streaming client sends. A device with more than one touchpad, a Steam Deck for
+     * instance, still needs {@link #getTouchpadFingerFast(int, int)} for the others.
+     * <p>
+     * Like the fast getters this samples whatever the last {@link ControllerManager#update()} read
+     * from the devices and does not refresh them itself, so a caller still updates once per cycle.
+     * Reading every pad from a single device walk is the more correct arrangement anyway, since all
+     * of them then describe the same instant rather than drifting apart mid-cycle. It does not drain
+     * SDL's event queue either, which {@link #pollNoUpdate()} is for.
+     *
+     * @param floatsOut     array of at least {@link #STATE_FLOATS}, filled with the analog state
+     * @param timestampsOut array of at least {@link #STATE_TIMESTAMPS}, filled with sensor sample times
+     * @return a bitmask where bit n is set when the button with SDL value n is held
+     * @throws ControllerUnpluggedException if the controller is not connected
+     * @throws IllegalArgumentException     if either array is too short
+     */
+    public long readStateFast(float[] floatsOut, long[] timestampsOut) throws ControllerUnpluggedException {
+        // Checked here as well as natively because the arrays are pinned for the duration of the
+        // call, so a short one would be written straight past the end of a live heap object. Checked
+        // before the connection, deliberately: a wrongly sized array is a permanent mistake in the
+        // caller and should surface the same way whether or not a pad happens to be plugged in,
+        // rather than hiding behind ControllerUnpluggedException until one is.
+        if (floatsOut.length < STATE_FLOATS) {
+            throw new IllegalArgumentException(
+                    "floatsOut must hold at least " + STATE_FLOATS + " floats, got " + floatsOut.length);
+        }
+        if (timestampsOut.length < STATE_TIMESTAMPS) {
+            throw new IllegalArgumentException(
+                    "timestampsOut must hold at least " + STATE_TIMESTAMPS + " longs, got " + timestampsOut.length);
+        }
+
+        ensureConnected();
+
+        return nativeReadStateFast(controllerPtr,
+                supportsTouchpad, supportsSensors, STATE_BUTTON_COUNT,
+                floatsOut, floatsOut.length,
+                timestampsOut, timestampsOut.length);
+    }
+
+    private native long nativeReadStateFast(long controllerPtr,
+                                            boolean readTouchpad,
+                                            boolean readSensors,
+                                            int buttonCount,
+                                            float[] floatsOut, int floatsLength,
+                                            long[] timestampsOut, int timestampsLength); /*
+        if (floatsLength < 20 || timestampsLength < 2) {
+            return 0; //the Java side rejects this first; this only keeps a pinned array safe
+        }
+
+        SDL_Gamepad* pad = jamepad_pad(controllerPtr);
+
+        //One bit per SDL_GamepadButton value. The width comes from ControllerButton, so the two
+        //cannot drift; re-clamped here because a shift of 64 or more is undefined behaviour and
+        //this runs with the caller's arrays pinned.
+        int buttons_to_read = buttonCount;
+        if (buttons_to_read < 0) {
+            buttons_to_read = 0;
+        } else if (buttons_to_read > 64) {
+            buttons_to_read = 64;
+        }
+
+        jlong buttons = 0;
+        for (int i = 0; i < buttons_to_read; i++) {
+            if (SDL_GetGamepadButton(pad, (SDL_GamepadButton) i)) {
+                buttons |= ((jlong) 1) << i;
+            }
+        }
+
+        for (int i = 0; i < 6; i++) {
+            //Same division as getAxisStateFast, in the same precision, so the two agree bit for bit.
+            floatsOut[i] = (float) SDL_GetGamepadAxis(pad, (SDL_GamepadAxis) i) / 32767.0f;
+        }
+
+        for (int i = 6; i < 20; i++) {
+            floatsOut[i] = 0.0f; //a pad without touch or motion reports zeroes, not stale values
+        }
+
+        if (readTouchpad) {
+            for (int finger = 0; finger < 2; finger++) {
+                bool down = false;
+                float x = 0.0f, y = 0.0f, pressure = 0.0f;
+                if (SDL_GetGamepadTouchpadFinger(pad, 0, finger, &down, &x, &y, &pressure)) {
+                    int base = 6 + (finger * 4);
+                    floatsOut[base] = down ? 1.0f : 0.0f;
+                    floatsOut[base + 1] = x;
+                    floatsOut[base + 2] = y;
+                    floatsOut[base + 3] = pressure;
+                }
+            }
+        }
+
+        timestampsOut[0] = 0;
+        timestampsOut[1] = 0;
+
+        if (readSensors) {
+            float accel[3] = { 0.0f, 0.0f, 0.0f };
+            float gyro[3] = { 0.0f, 0.0f, 0.0f };
+            SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, accel, 3);
+            SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, gyro, 3);
+
+            floatsOut[14] = accel[0];
+            floatsOut[15] = accel[1];
+            floatsOut[16] = accel[2];
+            floatsOut[17] = gyro[0];
+            floatsOut[18] = gyro[1];
+            floatsOut[19] = gyro[2];
+
+            //Sample times only arrive on events, the same way jamepad_read_sensor_state collects
+            //them. Safe inside the pinned region because it touches SDL's queue and not the JVM.
+            jamepad_take_sensor_events();
+            JamepadSensorClock *clock =
+                jamepad_sensor_clock(SDL_GetJoystickID(SDL_GetGamepadJoystick(pad)), false);
+            if (clock != NULL) {
+                timestampsOut[0] = (jlong) clock->accelTimestamp;
+                timestampsOut[1] = (jlong) clock->gyroTimestamp;
+            }
+        }
+
+        return buttons;
+    */
 }
