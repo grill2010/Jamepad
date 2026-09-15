@@ -328,6 +328,35 @@ public final class ControllerIndex {
     */
 
     /**
+     * Polls without asking SDL to re-read every device first, for callers that have already called
+     * {@link ControllerManager#update()} this cycle.
+     * <p>
+     * {@link ControllerManager#update()} calls SDL_UpdateGamepads() itself, so a loop that updates
+     * once and then polls each controller repeats that work per controller: with four pads, five
+     * full device walks where one would do, each one iterating every joystick and running the HIDAPI
+     * device updates. State read after this is the state that update() fetched, microseconds earlier
+     * in the same cycle, and every pad then reports the same instant rather than each being sampled
+     * as it is reached.
+     * <p>
+     * The event drain is kept, because that is the part which has to happen: SDL queues events for
+     * every sample it gathers and nothing here reads them, so leaving them would reach
+     * SDL_MAX_QUEUED_EVENTS and from then on SDL would refuse the device added and removed events
+     * hot plug needs. Draining once per controller against one update per cycle keeps up with the
+     * queue more easily than the two updates per drain that calling {@link #poll()} after
+     * update() produces.
+     * <p>
+     * Use {@link #poll()} instead when nothing else is refreshing SDL, which is the safe default.
+     */
+    public void pollNoUpdate() throws ControllerUnpluggedException {
+        ensureConnected();
+        nativePollNoUpdate(controllerPtr);
+    }
+
+    private native void nativePollNoUpdate(long controllerPtr); /*
+        jamepad_drain_polled_events();
+    */
+
+    /**
      * @return last error message logged by the native lib. Use this for debugging purposes.
      */
     public native String getLastNativeError(); /*
