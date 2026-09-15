@@ -286,7 +286,12 @@ public final class ControllerIndex {
                     if (!supportsHaptic) {
                         if (count == 0) {
                             connectHaptics(10_000, count + 1);
-                        } else {
+                        } else if (nativeGetConnectionState(controllerPtr) != CONNECTION_STATE_WIRELESS) {
+                            // A wireless controller is turned away on purpose, see nativeConnectHaptics: the
+                            // interface that carries haptics is a USB audio one, and claiming it for a
+                            // controller that is not on the cable would play one player's effects in
+                            // another's hands. Reporting the designed outcome of a supported setup as a
+                            // failure only sends whoever reads this log chasing it.
                             System.out.println("Connect haptics failed: " + getLastNativeError());
                         }
                     }
@@ -944,6 +949,47 @@ public final class ControllerIndex {
     private native String nativeGetSerial(long controllerPtr); /*
         const char* serial = SDL_GetGamepadSerial(jamepad_pad(controllerPtr));
         return serial == NULL ? NULL : env->NewStringUTF(serial);
+    */
+
+    /** The controller could not be asked about its transport at all, so nothing is known. */
+    public static final int CONNECTION_STATE_INVALID = -1;
+
+    /** The backend driving this controller does not report which transport it arrived over. */
+    public static final int CONNECTION_STATE_UNKNOWN = 0;
+
+    /** Attached by cable. */
+    public static final int CONNECTION_STATE_WIRED = 1;
+
+    /** Attached wirelessly, which for the controllers SDL has its own drivers for means Bluetooth. */
+    public static final int CONNECTION_STATE_WIRELESS = 2;
+
+    /**
+     * Which transport this controller arrived over, as one of the {@code CONNECTION_STATE_} values.
+     * <p>
+     * Worth having because several controller features exist on one transport and not the other, and until
+     * now the only way to guess at the transport was to watch which of those features turned up. A
+     * DualSense's haptics are the case in point: they travel over an audio interface belonging to its USB
+     * descriptor, so a controller reporting no haptics support was taken to be wireless. That reads wrong
+     * for the first second of a wired session, because the interface is opened on a delay, and it is the
+     * kind of guess that gets a caller writing to the wrong device.
+     * <p>
+     * Not every backend fills this in, so {@link #CONNECTION_STATE_UNKNOWN} is a normal answer and means
+     * only that the caller has to fall back to whatever it did before it could ask.
+     *
+     * @return one of the {@code CONNECTION_STATE_} values
+     * @throws ControllerUnpluggedException If the controller is not connected
+     */
+    public int getConnectionState() throws ControllerUnpluggedException {
+        ensureConnected();
+        return nativeGetConnectionState(controllerPtr);
+    }
+
+    private native int nativeGetConnectionState(long controllerPtr); /*
+        SDL_Joystick *joystick = jamepad_joystick(controllerPtr);
+        if(joystick == NULL) {
+            return (jint) SDL_JOYSTICK_CONNECTION_INVALID;
+        }
+        return (jint) SDL_GetJoystickConnectionState(joystick);
     */
 
     /**
