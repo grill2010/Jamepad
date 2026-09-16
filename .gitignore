@@ -1,6 +1,7 @@
 ## Java
 
 jni/
+jnigen/
 *.class
 *.war
 *.ear
