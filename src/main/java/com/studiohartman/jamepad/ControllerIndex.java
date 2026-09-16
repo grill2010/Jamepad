@@ -163,6 +163,17 @@ public final class ControllerIndex {
 
     private String controllerGuid = "";
 
+    /**
+     * Read once when the controller is connected, the same way {@link #numTouchpads} is. These
+     * identify the hardware, so they cannot change while one device stays plugged into one index,
+     * and a different device arriving goes through {@link #connectController()} which refreshes
+     * them. Cached because callers use them to recognise particular hardware, which means asking
+     * every poll, and a crossing per question is a lot to pay for an answer that never moves.
+     */
+    private int vendorId = 0;
+
+    private int productId = 0;
+
     private boolean supportsTouchpad = false;
 
     private int numTouchpads = 0;
@@ -226,6 +237,8 @@ public final class ControllerIndex {
         controllerPtr = nativeConnectController(index);
         if (controllerPtr == 0) {
             controllerGuid = EMPTY_GUID;
+            vendorId = 0;
+            productId = 0;
             supportsTouchpad = false;
             numTouchpads = 0;
             supportsSensors = false;
@@ -235,6 +248,8 @@ public final class ControllerIndex {
             return;
         }
         controllerGuid = nativeGetDeviceGuid(controllerPtr);
+        vendorId = nativeGetVendorId(controllerPtr);
+        productId = nativeGetProductId(controllerPtr);
         if(!Objects.equals(Configuration.SonyControllerFeature.NONE, sonyControllerFeature)) {
             numTouchpads = nativeGetNumTouchpads(controllerPtr);
             supportsTouchpad = numTouchpads > 0;
@@ -1443,12 +1458,12 @@ public final class ControllerIndex {
     */
 
     /**
-     * @return The USB Vendor ID (VID) of the controller.
-     * @throws ControllerUnpluggedException If the controller is not connected.
+     * @return The USB Vendor ID (VID) of the controller, or 0 if nothing is connected at this index.
+     * @throws ControllerUnpluggedException never; kept so that existing callers, which catch it
+     *         because this used to reach the device on every call, continue to compile unchanged
      */
     public int getVendorId() throws ControllerUnpluggedException {
-        ensureConnected();
-        return nativeGetVendorId(controllerPtr);
+        return vendorId;
     }
 
     private native int nativeGetVendorId(long controllerPtr); /*
@@ -1456,12 +1471,11 @@ public final class ControllerIndex {
     */
 
     /**
-     * @return The USB Product ID (PID) of the controller.
-     * @throws ControllerUnpluggedException If the controller is not connected.
+     * @return The USB Product ID (PID) of the controller, or 0 if nothing is connected at this index.
+     * @throws ControllerUnpluggedException never; see {@link #getVendorId()}
      */
     public int getProductId() throws ControllerUnpluggedException {
-        ensureConnected();
-        return nativeGetProductId(controllerPtr);
+        return productId;
     }
 
     private native int nativeGetProductId(long controllerPtr); /*
@@ -1636,8 +1650,15 @@ public final class ControllerIndex {
     /** Offset of the gyroscope x, y and z readings. */
     public static final int STATE_GYRO = 17;
 
+    /**
+     * Offset of touchpad 1's first finger, in the same four floats as {@link #STATE_TOUCH}. Only a
+     * device with two separate pads, a Steam Deck or Steam Controller, has one: everything else
+     * reports it untouched. Only the first finger, because these are single finger pads.
+     */
+    public static final int STATE_TOUCH_SECOND_PAD = 20;
+
     /** Required length of the float array passed to {@link #readStateFast(float[], long[])}. */
-    public static final int STATE_FLOATS = 20;
+    public static final int STATE_FLOATS = 24;
 
     /**
      * Required length of the timestamp array: the accelerometer sample time then the gyroscope
@@ -1692,9 +1713,10 @@ public final class ControllerIndex {
      * previous mask and takes {@code mask & ~previousMask}, which is cheaper than the per-button
      * tracking anyway because it does every button at once.
      * <p>
-     * Touch is limited to the first two fingers of touchpad 0, which is what a DualSense reports and
-     * what a streaming client sends. A device with more than one touchpad, a Steam Deck for
-     * instance, still needs {@link #getTouchpadFingerFast(int, int)} for the others.
+     * Touch covers the first two fingers of touchpad 0, which is what a DualSense reports and what a
+     * streaming client sends, plus the first finger of touchpad 1 at {@link #STATE_TOUCH_SECOND_PAD}
+     * for the two pad devices. A device with a third touchpad, or one that tracks more fingers than
+     * this, still needs {@link #getTouchpadFingerFast(int, int)} for the rest.
      * <p>
      * Like the fast getters this samples whatever the last {@link ControllerManager#update()} read
      * from the devices and does not refresh them itself, so a caller still updates once per cycle.
@@ -1726,13 +1748,13 @@ public final class ControllerIndex {
         ensureConnected();
 
         return nativeReadStateFast(controllerPtr,
-                supportsTouchpad, supportsSensors, STATE_BUTTON_COUNT,
+                numTouchpads, supportsSensors, STATE_BUTTON_COUNT,
                 floatsOut, floatsOut.length,
                 timestampsOut, timestampsOut.length);
     }
 
     private native long nativeReadStateFast(long controllerPtr,
-                                            boolean readTouchpad,
+                                            int touchpadCount,
                                             boolean readSensors,
                                             int buttonCount,
                                             float[] floatsOut, int floatsLength,
@@ -1765,11 +1787,14 @@ public final class ControllerIndex {
             floatsOut[i] = (float) SDL_GetGamepadAxis(pad, (SDL_GamepadAxis) i) / 32767.0f;
         }
 
-        for (int i = 6; i < 20; i++) {
-            floatsOut[i] = 0.0f; //a pad without touch or motion reports zeroes, not stale values
+        //Everything past the axes is zeroed first, so a pad without touch or motion reports zeroes
+        //rather than stale values, and so a read SDL declines leaves zeroes behind too.
+        int floats_to_fill = floatsLength < 24 ? floatsLength : 24;
+        for (int i = 6; i < floats_to_fill; i++) {
+            floatsOut[i] = 0.0f;
         }
 
-        if (readTouchpad) {
+        if (touchpadCount > 0) {
             for (int finger = 0; finger < 2; finger++) {
                 bool down = false;
                 float x = 0.0f, y = 0.0f, pressure = 0.0f;
@@ -1779,6 +1804,22 @@ public final class ControllerIndex {
                     floatsOut[base + 1] = x;
                     floatsOut[base + 2] = y;
                     floatsOut[base + 3] = pressure;
+                }
+            }
+
+            //Touchpad 1 finger 0, the right pad of a Steam Deck or Steam Controller. Asked of the
+            //device count rather than of SDL, so a one pad controller does not spend a declined call
+            //and an error string on it every poll. The length check is the other half: a caller
+            //compiled against the 20 float layout passes a shorter array than this needs, and must
+            //keep working rather than losing the whole read.
+            if (touchpadCount >= 2 && floatsLength >= 24) {
+                bool down = false;
+                float x = 0.0f, y = 0.0f, pressure = 0.0f;
+                if (SDL_GetGamepadTouchpadFinger(pad, 1, 0, &down, &x, &y, &pressure)) {
+                    floatsOut[20] = down ? 1.0f : 0.0f;
+                    floatsOut[21] = x;
+                    floatsOut[22] = y;
+                    floatsOut[23] = pressure;
                 }
             }
         }
