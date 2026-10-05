@@ -68,9 +68,34 @@ public class Configuration {
      * running Linux is covered by {@link #useControllerMotionSensors} instead, because SDL
      * exposes its IMU through the Steam Deck controller.
      *
-     * <p>Access the readings with {@link ControllerManager#getSystemMotionSensors()}.
+     * <p>Access the readings with {@link ControllerManager#getSystemMotionSensors()}. On Windows
+     * they only arrive with {@link #useHandheldMotionSensors} enabled as well.
      */
     public boolean useSystemMotionSensors = false;
+
+    /**
+     * Do what it takes beyond opening them for the motion sensors built into a handheld to
+     * report. Only enable this if you read those sensors, because it changes how Jamepad drives
+     * the device.
+     *
+     * <p>On Windows, a handheld's sensors deliver their readings as window messages to the
+     * thread that initialised Jamepad. Only SDL's video subsystem dispatches those, and the
+     * bundled SDL is built without it. With this enabled, {@link ControllerManager#update()}
+     * dispatches them, so call it from the thread that called
+     * {@link ControllerManager#initSDLGamepad()}, and preferably from a thread that owns no
+     * windows of its own. Sensors that SDL fuses into a handheld's gamepad, see the
+     * {@code SDL_GAMECONTROLLER_SENSOR_FUSION} hint, report nothing without this, and neither do
+     * {@link #useSystemMotionSensors}.
+     *
+     * <p>On a Steam Deck, the Steam client switches the IMU off while Steam Input has no gyro
+     * bound for the focused application, and SDL never switches it back on. With this enabled,
+     * Jamepad switches it on while the Deck's sensors are enabled and again whenever it finds it
+     * off. It never switches it off, which is also how the Deck behaves without Steam.
+     *
+     * <p>Only useful together with {@link #useControllerMotionSensors} or
+     * {@link #useSystemMotionSensors}.
+     */
+    public boolean useHandheldMotionSensors = false;
 
     public enum SonyControllerFeature {
         /**

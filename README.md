@@ -71,6 +71,16 @@ Windows, Android and a few consoles, so check `isAvailable()` before relying on 
 handhelds differ in how the IMU is physically mounted, you will usually still need your own
 per-device axis correction there.
 
+If you read a handheld's built-in sensors, also enable `Configuration.useHandheldMotionSensors`.
+On Windows those sensors deliver their readings as window messages to the thread that
+initialised Jamepad, and the bundled SDL is built without the video subsystem that would
+dispatch them. With the flag on, `ControllerManager.update()` dispatches every message of
+that thread, so call it from the thread that called `initSDLGamepad()`, ideally one that owns
+no windows of its own. Both sensors SDL fuses into a handheld's gamepad (the
+`SDL_GAMECONTROLLER_SENSOR_FUSION` hint) and `useSystemMotionSensors` report nothing on Windows
+without it. On a Steam Deck, the Steam client switches the IMU off while Steam Input has no
+gyro bound, and the flag makes Jamepad switch it back on while the Deck's sensors are enabled.
+
 SDL does not provide fused orientation. If you need a quaternion, run the raw gyroscope and
 accelerometer readings through your own filter.
 

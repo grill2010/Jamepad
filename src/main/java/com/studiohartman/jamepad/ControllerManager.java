@@ -28,10 +28,25 @@ import java.util.Objects;
 public class ControllerManager {
     /*JNI
 
+    #ifdef _WIN32
+    #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+    #endif
+    #ifndef NOMINMAX
+    #define NOMINMAX
+    #endif
+    #include <windows.h>
+    #endif
+
     #include <SDL3/SDL.h>
     #include <stdio.h>
 
     static int lastGamepadCount = -1;
+
+    #ifdef _WIN32
+    static bool jamepad_dispatch_messages = false;
+    static DWORD jamepad_sdl_thread_id = 0;
+    #endif
 
     static int jamepad_count_gamepads() {
         int count = 0;
@@ -58,6 +73,33 @@ public class ControllerManager {
         }
 
         return sawAny;
+    }
+
+    // The Windows Sensor API delivers its readings as window messages to the thread that brought
+    // SDL up, and only SDL's video subsystem, which is not built, would ever dispatch them.
+    static void jamepad_set_message_dispatch(bool enabled) {
+    #ifdef _WIN32
+        jamepad_dispatch_messages = enabled;
+        jamepad_sdl_thread_id = GetCurrentThreadId();
+    #else
+        (void) enabled;
+    #endif
+    }
+
+    static void jamepad_dispatch_window_messages() {
+    #ifdef _WIN32
+        // On any other thread this would dispatch somebody else's messages, a UI toolkit's for instance.
+        if (!jamepad_dispatch_messages || GetCurrentThreadId() != jamepad_sdl_thread_id) {
+            return;
+        }
+        // Readings keep arriving while these are dispatched. Stop after a batch and leave the rest
+        // to the next update rather than spinning here.
+        MSG msg;
+        for (int i = 0; i < 256 && PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE); i++) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    #endif
     }
     */
 
@@ -132,7 +174,8 @@ public class ControllerManager {
 
         //Initialize SDL
         if (!nativeInitSDLGamepad(!configuration.useRawInput, sonyControllerFeature.getValue(),
-                configuration.useControllerMotionSensors, configuration.useSystemMotionSensors)) {
+                configuration.useControllerMotionSensors, configuration.useSystemMotionSensors,
+                configuration.useHandheldMotionSensors)) {
             throw new IllegalStateException("Failed to initialize SDL in native method!");
         } else {
             isInitialized = true;
@@ -177,13 +220,20 @@ public class ControllerManager {
     }
     private native boolean nativeInitSDLGamepad(boolean disableRawInput, int sonyControllerFeature,
                                                 boolean useControllerMotionSensors,
-                                                boolean useSystemMotionSensors); /*
+                                                boolean useSystemMotionSensors,
+                                                boolean useHandheldMotionSensors); /*
         if (disableRawInput) {
             SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
         }
         if (useControllerMotionSensors) {
             // Motion data arrives in the extended report, which some drivers only send once asked.
             SDL_SetHint(SDL_HINT_JOYSTICK_ENHANCED_REPORTS, "1");
+        }
+        if (useHandheldMotionSensors) {
+            // Not an upstream hint, it only exists with patches/sdl/0002-steam-deck-keep-imu-on.patch
+            // applied. The Steam Deck driver then keeps the IMU sampling while the Deck's sensors are
+            // enabled, even after the Steam client has switched it off.
+            SDL_SetHint("SDL_JOYSTICK_HIDAPI_STEAMDECK_IMU", "1");
         }
         if(sonyControllerFeature != 0) {
             // SDL 3 folded SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE and ..._PS5_RUMBLE into this one hint.
@@ -203,6 +253,8 @@ public class ControllerManager {
             printf("NATIVE METHOD: SDL_Init failed: %s\n", SDL_GetError());
             return JNI_FALSE;
         }
+
+        jamepad_set_message_dispatch(useHandheldMotionSensors);
 
         //Sensor updates are high frequency. Nobody drains them unless motion is switched on,
         //so keep them off the queue entirely in that case.
@@ -261,6 +313,7 @@ public class ControllerManager {
     }
     private native void nativeCloseSDLGamepad(); /*
         SDL_Quit();
+        jamepad_set_message_dispatch(false);
     */
 
     /**
@@ -483,6 +536,11 @@ public class ControllerManager {
      *
      * If there hasn't been a change in whether controller are connected or not, nothing will happen.
      *
+     * <p>On Windows, with {@link Configuration#useHandheldMotionSensors} enabled, this also
+     * dispatches the window messages that carry the readings of a handheld's motion sensors.
+     * Those only ever reach the thread that called {@link #initSDLGamepad()}, so call this from
+     * that thread.
+     *
      * @return True if the controller list was refreshed, false otherwise
      * @throws IllegalStateException if Jamepad was not initialized
      */
@@ -498,6 +556,7 @@ public class ControllerManager {
     }
 
     private native boolean nativeControllerConnectedOrDisconnected(); /*
+        jamepad_dispatch_window_messages();
         SDL_UpdateGamepads();
         SDL_PumpEvents();
 

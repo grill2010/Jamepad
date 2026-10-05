@@ -1,0 +1,133 @@
+Keep the Steam Deck IMU sampling while sensors are enabled.
+
+The Deck samples its IMU by default, which is why the driver's SetSensorsEnabled did
+nothing. The Steam client, however, writes SETTING_IMU_MODE off whenever Steam Input has
+no gyro bound for the focused application, and again when its overlay closes. Steam runs
+in the background on a Deck nearly all the time, so the driver kept decoding reports and
+reporting sensor data, but every gyro and accelerometer field was zero and motion looked
+dead.
+
+Behind a new hint, SDL_JOYSTICK_HIDAPI_STEAMDECK_IMU, write SETTING_IMU_MODE when sensors
+are enabled, and write it again, at most once a second, while the reports keep showing an
+all-zero IMU. The hint is off by default because the setting is Steam's to make while
+Steam Input has the Deck, so nothing changes for anyone who does not ask for it. The IMU is
+never switched off: sampling is the Deck's own default, and Steam or another reader may
+rely on it.
+diff --git a/src/joystick/hidapi/SDL_hidapi_steamdeck.c b/src/joystick/hidapi/SDL_hidapi_steamdeck.c
+index 8bfb64dfd..ca9da0dd3 100644
+--- a/src/joystick/hidapi/SDL_hidapi_steamdeck.c
++++ b/src/joystick/hidapi/SDL_hidapi_steamdeck.c
+@@ -32,6 +32,12 @@
+ #include "steam/controller_constants.h"
+ #include "steam/controller_structs.h"
+ 
++/* Off by default, because the Steam client owns the IMU setting while Steam Input has the Deck.
++ * When set, the driver keeps the IMU sampling while sensors are enabled, see SetSensorsEnabled. */
++#ifndef SDL_HINT_JOYSTICK_HIDAPI_STEAMDECK_IMU
++#define SDL_HINT_JOYSTICK_HIDAPI_STEAMDECK_IMU "SDL_JOYSTICK_HIDAPI_STEAMDECK_IMU"
++#endif
++
+ enum
+ {
+     SDL_GAMEPAD_BUTTON_STEAM_DECK_QAM = 11,
+@@ -85,6 +91,9 @@ typedef struct
+     Uint64 sensor_timestamp_ns;
+     Uint64 last_button_state;
+     Uint8 watchdog_counter;
++    bool keep_imu_on;
++    bool imu_silent;
++    Uint64 last_imu_enable;
+ 
+     bool left_touch_down;
+     float left_touch_x;
+@@ -158,6 +167,28 @@ static bool FeedDeckLizardWatchdog(SDL_hid_device *dev)
+     return true;
+ }
+ 
++static bool EnableDeckIMU(SDL_hid_device *dev)
++{
++    int rc;
++    Uint8 buffer[HID_FEATURE_REPORT_BYTES + 1] = { 0 };
++    FeatureReportMsg *msg = (FeatureReportMsg *)(buffer + 1);
++
++    msg->header.type = ID_SET_SETTINGS_VALUES;
++    msg->header.length = 1 * sizeof(ControllerSetting);
++    msg->payload.setSettingsValues.settings[0].settingNum = SETTING_IMU_MODE;
++    msg->payload.setSettingsValues.settings[0].settingValue = (SETTING_GYRO_MODE_SEND_RAW_ACCEL | SETTING_GYRO_MODE_SEND_RAW_GYRO);
++
++    rc = SDL_hid_send_feature_report(dev, buffer, sizeof(buffer));
++    if (rc != sizeof(buffer))
++        return false;
++
++    // There may be a lingering report read back after changing settings.
++    // Discard it.
++    SDL_hid_get_feature_report(dev, buffer, sizeof(buffer));
++
++    return true;
++}
++
+ static void HIDAPI_DriverSteamDeck_HandleState(SDL_HIDAPI_Device *device,
+                                                SDL_Joystick *joystick,
+                                                ValveInReport_t *pInReport)
+@@ -259,6 +290,14 @@ static void HIDAPI_DriverSteamDeck_HandleState(SDL_HIDAPI_Device *device,
+     values[2] = (-pInReport->payload.deckState.sAccelY / 32768.0f) * 2.0f * SDL_STANDARD_GRAVITY;
+     SDL_SendJoystickSensor(timestamp, joystick, SDL_SENSOR_ACCEL, ctx->sensor_timestamp_ns, values, 3);
+ 
++    // Gravity alone keeps a sampling accelerometer off zero, so all zeros means the IMU is off.
++    ctx->imu_silent = (pInReport->payload.deckState.sAccelX == 0 &&
++                       pInReport->payload.deckState.sAccelY == 0 &&
++                       pInReport->payload.deckState.sAccelZ == 0 &&
++                       pInReport->payload.deckState.sGyroX == 0 &&
++                       pInReport->payload.deckState.sGyroY == 0 &&
++                       pInReport->payload.deckState.sGyroZ == 0);
++
+     bool left_touch_down = (pInReport->payload.deckState.ulButtonsL & STEAMDECK_LBUTTON_LEFT_TOUCHPAD_TOUCH) ? true : false;
+     bool right_touch_down = (pInReport->payload.deckState.ulButtonsL & STEAMDECK_LBUTTON_RIGHT_TOUCHPAD_TOUCH) ? true : false;
+     if (left_touch_down || ctx->left_touch_down) {
+@@ -401,6 +440,16 @@ static bool HIDAPI_DriverSteamDeck_UpdateDevice(SDL_HIDAPI_Device *device)
+         }
+     } while (r > 0);
+ 
++    if (ctx->keep_imu_on && ctx->imu_silent) {
++        // The Steam client switches the IMU off again, when its overlay closes for instance.
++        // Switch it back on, but no more than once a second while that does not take.
++        Uint64 now = SDL_GetTicks();
++        if (now - ctx->last_imu_enable >= 1000) {
++            EnableDeckIMU(device->dev);
++            ctx->last_imu_enable = now;
++        }
++    }
++
+     return true;
+ }
+ 
+@@ -467,13 +516,27 @@ static bool HIDAPI_DriverSteamDeck_SendJoystickEffect(SDL_HIDAPI_Device *device,
+ 
+ static bool HIDAPI_DriverSteamDeck_SetSensorsEnabled(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, bool enabled)
+ {
+-    // On steam deck, sensors are enabled by default. Nothing to do here.
++    SDL_DriverSteamDeck_Context *ctx = (SDL_DriverSteamDeck_Context *)device->context;
++
++    // On steam deck, sensors are enabled by default, but the Steam client switches the IMU off
++    // while Steam Input has no gyro bound for the focused application. Only take the setting over
++    // when asked to, and never switch the IMU off, which is how the Deck behaves without Steam.
++    ctx->keep_imu_on = enabled && SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_STEAMDECK_IMU, false);
++    if (ctx->keep_imu_on) {
++        // A failed write is retried from UpdateDevice once the reports show the IMU still off.
++        EnableDeckIMU(device->dev);
++        ctx->last_imu_enable = SDL_GetTicks();
++    }
+     return true;
+ }
+ 
+ static void HIDAPI_DriverSteamDeck_CloseJoystick(SDL_HIDAPI_Device *device, SDL_Joystick *joystick)
+ {
+-    // Lizard mode id automatically re-enabled by watchdog. Nothing to do here.
++    SDL_DriverSteamDeck_Context *ctx = (SDL_DriverSteamDeck_Context *)device->context;
++
++    // Lizard mode id automatically re-enabled by watchdog. The IMU is left on.
++    ctx->keep_imu_on = false;
++    ctx->imu_silent = false;
+ }
+ 
+ static void HIDAPI_DriverSteamDeck_FreeDevice(SDL_HIDAPI_Device *device)
