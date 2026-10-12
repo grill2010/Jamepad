@@ -421,6 +421,35 @@ public class ControllerManager {
     }
 
     /**
+     * Sends adaptive trigger effects to the controller at this given index, together with how far it attenuates its
+     * motors, see {@link ControllerIndex#sendAdaptiveTriggerEffects(byte, byte[], byte, byte[], int, int)}.
+     * It the controller is not a DualSense controller calling this function doesn't have any effect.
+     *
+     * @param index The index of the controller that will be used to send the adaptive trigger data
+     * @param leftTriggerEffect The left trigger effect type
+     * @param triggerDataLeft The left trigger adaptive data
+     * @param rightTriggerEffect The right trigger effect type
+     * @param triggerDataRight The right trigger adaptive data
+     * @param rumbleAttenuation Attenuation of the rumble and haptic motors, 0 (full strength) to 7
+     * @param triggerAttenuation Attenuation of the trigger motors, 0 (full strength) to 7
+     * @return true if the adaptive trigger data was sent successfully, false otherwise
+     * @throws IllegalStateException if Jamepad was not initialized
+     */
+    public boolean sendAdaptiveTriggerEffects(int index, byte leftTriggerEffect, byte[] triggerDataLeft, byte rightTriggerEffect, byte[] triggerDataRight, int rumbleAttenuation, int triggerAttenuation){
+        verifyInitialized();
+
+        if(index < controllers.length && index >= 0) {
+            try {
+                return controllers[index].sendAdaptiveTriggerEffects(leftTriggerEffect, triggerDataLeft, rightTriggerEffect, triggerDataRight, rumbleAttenuation, triggerAttenuation);
+            } catch (ControllerUnpluggedException e) {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Sends haptic feedback audio data to the controller at this given index.
      * Audio Data must be in 3KHZ, 2 channel, 16-bit Little-Endian PCM format.
      * It the controller is not a DualSense controller calling this function doesn't have any effect.

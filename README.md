@@ -217,7 +217,16 @@ byte[] leftAdaptiveTriggerData = new byte[]{ 0, 110, 0, 0, 0, 0, 0, 0, 0, 0 };
 byte rightTriggerEffect = 0x06;
 byte[] rightAdaptiveTriggerData = new byte[]{ 15, 63, (byte) 128, 0, 0, 0, 0, 0, 0, 0 };
 
-controllers.sendAdaptiveTriggers(0, leftTriggerEffect, leftAdaptiveTriggerData, rightTriggerEffect, rightAdaptiveTriggerData);
+controllers.sendAdaptiveTriggerEffects(0, leftTriggerEffect, leftAdaptiveTriggerData, rightTriggerEffect, rightAdaptiveTriggerData);
+```
+
+To also set how far the DualSense attenuates its motors, for instance to honour a console's trigger effect intensity,
+pass the attenuation of the rumble and haptic motors and of the trigger motors, each from 0 (full strength) to 7 in
+steps of 12.5%. The controller keeps it until it is set again.
+
+```java
+/* Rumble and haptics at full strength, trigger effects at half */
+controllers.sendAdaptiveTriggerEffects(0, leftTriggerEffect, leftAdaptiveTriggerData, rightTriggerEffect, rightAdaptiveTriggerData, 0, 4);
 ```
 
 More information about the adaptive trigger data can [be found here](https://controllers.fandom.com/wiki/Sony_DualSense#FFB_Trigger_Modes).

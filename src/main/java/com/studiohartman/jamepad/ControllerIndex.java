@@ -1205,6 +1205,34 @@ public final class ControllerIndex {
         return nativeSendAdaptiveTriggerEffects(controllerPtr, leftTriggerEffect, triggerDataLeft, triggerDataLeft.length, rightTriggerEffect, triggerDataRight, triggerDataRight.length);
     }
 
+    /**
+     * Send adaptive trigger effects to the controller, together with how far it attenuates its motors.
+     * If the controller is not a DualSense controller calling this function doesn't have any effect.
+     * <p>
+     * The attenuation is the controller's own, from 0 (full strength) to 7 in steps of 12.5%, and it is how remote
+     * play clients honour a console's vibration and trigger effect intensity. The controller keeps it until it is
+     * set again, so it outlasts these effects and applies to rumble and haptics sent any other way as well.
+     *
+     * @param leftTriggerEffect the left trigger effect type
+     * @param triggerDataLeft the left trigger adaptive data
+     * @param rightTriggerEffect the right trigger effect type
+     * @param triggerDataRight the right trigger adaptive data
+     * @param rumbleAttenuation attenuation of the rumble and haptic motors, 0 to 7
+     * @param triggerAttenuation attenuation of the trigger motors, 0 to 7
+     * @return true if the adaptive trigger data was sent successfully, false otherwise
+     * @throws ControllerUnpluggedException If the controller is not connected
+     */
+    public boolean sendAdaptiveTriggerEffects(byte leftTriggerEffect, byte[] triggerDataLeft, byte rightTriggerEffect, byte[] triggerDataRight, int rumbleAttenuation, int triggerAttenuation) throws ControllerUnpluggedException {
+        ensureConnected();
+
+        if(!hasBasicDualSenseFeatures() || !nativeIsDualSenseController(controllerPtr)) {
+            return false;
+        }
+
+        needToClearTriggerEffect = true;
+        return nativeSendAttenuatedAdaptiveTriggerEffects(controllerPtr, leftTriggerEffect, triggerDataLeft, triggerDataLeft.length, rightTriggerEffect, triggerDataRight, triggerDataRight.length, rumbleAttenuation, triggerAttenuation);
+    }
+
     private native boolean nativeIsDualSenseController(long controllerPtr); /*
         SDL_Gamepad* pad = jamepad_pad(controllerPtr);
         Uint16 sonyVendorId = 0x054c;
@@ -1263,6 +1291,32 @@ public final class ControllerIndex {
         SDL_memcpy(state.rgucLeftTriggerEffect + 1, triggerDataLeft, leftTriggerDataSize);
         state.rgucRightTriggerEffect[0] = rightTriggerEffect;
         SDL_memcpy(state.rgucRightTriggerEffect + 1, triggerDataRight, rightTriggerDataSize);
+
+        return SDL_SendGamepadEffect(pad, &state, sizeof(state)) ? JNI_TRUE : JNI_FALSE;
+    */
+
+    private native boolean nativeSendAttenuatedAdaptiveTriggerEffects(long controllerPtr,
+                                                                      byte leftTriggerEffect,
+                                                                      byte[] triggerDataLeft,
+                                                                      int leftTriggerDataSize,
+                                                                      byte rightTriggerEffect,
+                                                                      byte[] triggerDataRight,
+                                                                      int rightTriggerDataSize,
+                                                                      int rumbleAttenuation,
+                                                                      int triggerAttenuation); /*
+        SDL_Gamepad* pad = jamepad_pad(controllerPtr);
+
+        DS5EffectsState_t state;
+        SDL_zero(state);
+
+        state.ucEnableBits1 |= (0x04 | 0x08); // Modify right and left trigger effect respectively
+        state.ucEnableBits2 |= 0x40;          // Modify the motor attenuation
+        // The rumble and haptic motors' attenuation in the low nibble, the trigger motors' in the high one.
+        state.rgucUnknown1[4] = (Uint8) ((rumbleAttenuation & 0x07) | ((triggerAttenuation & 0x07) << 4));
+        state.rgucLeftTriggerEffect[0] = leftTriggerEffect;
+        SDL_memcpy(state.rgucLeftTriggerEffect + 1, triggerDataLeft, SDL_min(leftTriggerDataSize, 10));
+        state.rgucRightTriggerEffect[0] = rightTriggerEffect;
+        SDL_memcpy(state.rgucRightTriggerEffect + 1, triggerDataRight, SDL_min(rightTriggerDataSize, 10));
 
         return SDL_SendGamepadEffect(pad, &state, sizeof(state)) ? JNI_TRUE : JNI_FALSE;
     */
